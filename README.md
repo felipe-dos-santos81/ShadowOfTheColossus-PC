@@ -26,9 +26,10 @@ make build    # out/bb-probe e out/bb-gpu-capabilities
 make play     # prepara a imagem do jogo e abre a janela
 ```
 
-No macOS o renderizador precisa do driver **KosmicKrisp** (`make driver`, 20–40 minutos):
-o MoltenVK só serve para os testes de capacidades, porque não tem *sparse buffer binding*.
-`make verify` roda o jogo por 30 s e confere o log; `make help` lista todos os alvos.
+No macOS o renderizador precisa do driver **KosmicKrisp** (`make driver`, 20–40 minutos). O
+MoltenVK só serve para os testes de capacidades: ele não expõe *buffer device address*, então
+`vkGetBufferDeviceAddress` devolve 0 e o renderizador para. `make verify` roda o jogo por 30 s e
+confere o log; `make help` lista todos os alvos.
 
 Para jogar com o pacote pronto, baixe o `SotC-PC.zip` de [Releases](../../releases),
 descompacte e abra o **`SotC.exe`**. Na primeira vez o lançador procura sozinho nos discos do PC
@@ -111,9 +112,10 @@ make build    # out/bb-probe and out/bb-gpu-capabilities
 make play     # prepare the game image and open the window
 ```
 
-On macOS the renderer needs Mesa's **KosmicKrisp** driver (`make driver`, 20–40 minutes): MoltenVK
-only serves the capability checks, because it has no sparse buffer binding. `make verify` runs the
-game for 30 s and checks the log; `make help` lists every target.
+On macOS the renderer needs Mesa's **KosmicKrisp** driver (`make driver`, 20–40 minutes). MoltenVK
+only serves the capability checks: it does not expose buffer device address, so
+`vkGetBufferDeviceAddress` returns 0 and the renderer stops. `make verify` runs the game for 30 s
+and checks the log; `make help` lists every target.
 
 To play with the packaged build, download `SotC-PC.zip` from [Releases](../../releases), unzip it
 and run **`SotC.exe`**. On first start the launcher searches the PC's drives for the game folder,
