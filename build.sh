@@ -89,7 +89,7 @@ Darwin*)
         -DVCPKG_TARGET_TRIPLET=x64-osx "${vcpkg_flags[@]}" \
         -DVCPKG_INSTALLED_DIR="$PWD/out/vcpkg_installed" >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF} (x86-64, Rosetta 2)"
-    tests=(compat-mac-test pad-test file-mods-test content-test runtime-test sema-test)
+    tests=(compat-mac-test pad-test file-mods-test content-test runtime-test sema-test window-scale-test)
     targets=(bb-probe bb-gpu-capabilities)
     if [[ ${1:-} == --test ]]; then targets+=("${tests[@]}"); fi
     if ! ninja -C out/gpu "${targets[@]}" > out/gpu-build.log 2>&1; then
@@ -182,4 +182,10 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
+    # The windowed-mode size clamp is header-only; build it where a C++ compiler is present.
+    CXX=${CXX:-$(command -v c++ || command -v g++ || true)}
+    if [[ -n $CXX ]]; then
+        "$CXX" -std=c++17 -O2 -g -Wall -Wextra -Werror -Igpu/shim tests/test_window_scale.cpp -o out/window-scale-test
+        out/window-scale-test
+    fi
 fi

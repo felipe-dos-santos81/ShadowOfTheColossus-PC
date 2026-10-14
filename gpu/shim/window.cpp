@@ -1,5 +1,4 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11, Wayland, Win32 or a CAMetalLayer on macOS).
-#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +10,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
+#include "window_scale.h"
 #include "bbport_overlay.h"
 #include "video_core/renderdoc.h"
 
@@ -32,12 +32,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     const bool is_fullscreen = fullscreen && fullscreen[0] == '1';
     if (!is_fullscreen) {
         SDL_Rect usable{};
-        if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) &&
-            usable.w > 0 && usable.h > 0 &&
-            (width_ > usable.w * 9 / 10 || height_ > usable.h * 9 / 10)) {
-            const double scale = std::min(usable.w * 0.9 / width_, usable.h * 0.9 / height_);
-            width_ = static_cast<s32>(width_ * scale);
-            height_ = static_cast<s32>(height_ * scale);
+        if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable)) {
+            const WindowSize scaled = ScaleWindowToDisplay({width_, height_},
+                                                           {usable.w, usable.h});
+            width_ = scaled.width;
+            height_ = scaled.height;
         }
     }
     SDL_PropertiesID props = SDL_CreateProperties();
