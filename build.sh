@@ -80,7 +80,7 @@ Darwin*)
         cp -a ../../theirs/bloodborne_pc/out/vcpkg_installed out/vcpkg_installed
     fi
     vcpkg_flags=(-DVCPKG_MANIFEST_DIR="$PWD/packaging/macos")
-    if [[ -d out/vcpkg_installed/x64-osx ]]; then
+    if [[ -d out/vcpkg_installed/x64-osx ]] && bash tools/vcpkg_ready.sh out/vcpkg_installed/x64-osx; then
         vcpkg_flags=(-DVCPKG_MANIFEST_INSTALL=OFF)
     fi
     env -u VULKAN_SDK cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \

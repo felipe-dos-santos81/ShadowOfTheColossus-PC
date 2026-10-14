@@ -193,6 +193,29 @@ bash build.sh                              # out/bb-probe.exe
 bash packaging/windows/package_sotc.sh     # dist/SotC-PC.zip
 ```
 
+### macOS (Apple Silicon)
+
+Build de x86-64 para rodar sob o Rosetta 2 / an x86-64 build to run under Rosetta 2. Precisa do
+Xcode Command Line Tools e de `cmake`, `ninja`, `pkgconf`, `glslang`, `nasm` e um Python 3 /
+needs Xcode Command Line Tools and `cmake`, `ninja`, `pkgconf`, `glslang`, `nasm` and a Python 3
+(`brew install cmake ninja pkgconf glslang nasm`).
+
+```
+bash build.sh --test              # out/bb-probe + os binários de teste / the test binaries
+python3 sotc.py                   # janela SDL3 (Metal) em modo janela / SDL3 (Metal) window, windowed
+python3 tools/macos_check.py      # o portão de aceitação / the acceptance gate
+```
+
+`python3 tools/macos_check.py` roda o jogo por ~30 s e falha se o log não trouxer a imagem abaixo
+de 2 GiB, a linha da janela (`Window <L>x<A> windowed: relative mouse off, grab off`), o
+presentador Vulkan e a heap escolhida — ou se trouxer `STOP:`, uma asserção falhada ou um
+traceback do Python. É o portão de aceitação do macOS / it is the macOS acceptance gate.
+
+O renderizador usa o **KosmicKrisp** do Mesa para x86-64 (`tools/build_kosmickrisp.sh`; sem ele o
+`MoltenVK_icd.json` serve só para os testes de capacidades, porque o MoltenVK não tem sparse
+buffer binding) / the renderer uses Mesa's x86-64 **KosmicKrisp** (`tools/build_kosmickrisp.sh`;
+without it `MoltenVK_icd.json` only serves the capability checks).
+
 O empacotamento recusa qualquer `.sprx`/`.prx` / packaging refuses any `.sprx`/`.prx`: Sony
 firmware never goes into the package. Ferramentas de teste / test tools: `tools/`. Variáveis de
 diagnóstico / diagnostic variables: [docs/sotc/README-SotC.md](docs/sotc/README-SotC.md).
