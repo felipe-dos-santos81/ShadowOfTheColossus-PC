@@ -18,8 +18,17 @@ import subprocess
 import sys
 import threading
 import time
+from typing import NamedTuple
 
 PORT = Path(__file__).resolve().parent.parent
+
+
+class Run(NamedTuple):
+    """A captured run: the problems found in it, and the log they were found in."""
+
+    problems: list[str]
+    log: str
+
 
 MARKERS = (
     ('image below 2 GiB', r'Image at 0x[0-9a-f]+ \(below 2 GiB'),
@@ -31,7 +40,7 @@ MARKERS = (
 
 FORBIDDEN = (
     ('stopped', r'STOP:'),
-    ('assertion', r'Assertion failed'),
+    ('assertion', r'[Aa]ssertion [Ff]ailed'),
     ('python traceback', r'Traceback \(most recent call last\)'),
 )
 
@@ -51,7 +60,7 @@ def check_log(log, returncode=None):
 
 
 def run(port, seconds=30.0, command=None):
-    """Run the port for `seconds`, end its process group, and return (problems, log).
+    """Run the port for `seconds`, end its process group, and return a `Run`.
 
     The output is drained on a thread so a process that stops printing cannot block the deadline;
     the process group gets SIGTERM and, if it is ignored, SIGKILL (a game that never closes its
@@ -64,26 +73,40 @@ def run(port, seconds=30.0, command=None):
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                start_new_session=True)
     lines = []
-    reader = threading.Thread(target=lambda: lines.extend(process.stdout), daemon=True)
+
+    def drain():
+        try:
+            lines.extend(process.stdout)
+        except (ValueError, OSError):
+            pass  # the reader raced the close below; whatever it captured is already in `lines`
+
+    reader = threading.Thread(target=drain, daemon=True)
     reader.start()
     deadline = time.monotonic() + seconds
     while process.poll() is None and time.monotonic() < deadline:
         time.sleep(0.05)
     ended_by_gate = process.poll() is None
     if ended_by_gate:
-        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # the group ended between poll() and the signal
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait(timeout=5)
     reader.join(timeout=5)
-    process.stdout.close()
+    if not reader.is_alive():
+        process.stdout.close()
     log = ''.join(lines)
     # The gate ends the run itself, so a process that stopped on its own is a failure: a clean
     # exit or a signal, after the markers, is not the "still running" a PASS claims.
     returncode = None if ended_by_gate or process.returncode == 0 else process.returncode
-    return check_log(log, returncode), log
+    return Run(check_log(log, returncode), log)
 
 
 def main(argv=None):
@@ -91,14 +114,14 @@ def main(argv=None):
     parser.add_argument('--seconds', type=float, default=30.0,
                         help='how long to let the game run (default: 30)')
     args = parser.parse_args(argv)
-    problems, log = run(PORT, seconds=args.seconds)
-    if not problems:
+    result = run(PORT, seconds=args.seconds)
+    if not result.problems:
         print('macos_check: PASS')
         return 0
-    for problem in problems:
+    for problem in result.problems:
         print(problem, file=sys.stderr)
     print('--- captured log ---', file=sys.stderr)
-    sys.stderr.write(log)
+    sys.stderr.write(result.log)
     return 1
 
 

@@ -120,18 +120,18 @@ def merged_source(game, update, out):
     return merged
 
 
-def extract_pkg(pkg, out, tool=None):
+def extract_pkg(pkg, out):
     """Extracts a CUSA08809 .pkg into out/CUSA08809 using PkgTool.Core if not extracted yet."""
     target = out / 'CUSA08809'
     if (target / 'eboot.bin').is_file() and (target / 'sce_sys' / 'param.sfo').is_file():
         return target
+    tool = None
+    for candidate in (out / 'pkgtool' / 'PkgTool.Core',
+                      PORT.parent.parent / 'theirs' / 'bloodborne_pc' / 'out' / 'pkgtool' / 'PkgTool.Core'):
+        if candidate.is_file():
+            tool = candidate
+            break
     if tool is None:
-        for candidate in (out / 'pkgtool' / 'PkgTool.Core',
-                          PORT.parent.parent / 'theirs' / 'bloodborne_pc' / 'out' / 'pkgtool' / 'PkgTool.Core'):
-            if candidate.is_file():
-                tool = candidate
-                break
-    if not tool:
         fail(f'{pkg} is a .pkg archive and PkgTool.Core was not found to extract it.')
     print(f'Extracting {pkg.name} into {target}...')
     extract_dir = out / 'pkg-extract'

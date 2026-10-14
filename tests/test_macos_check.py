@@ -47,6 +47,12 @@ class CheckLog(unittest.TestCase):
         self.assertEqual(macos_check.check_log(GOOD + 'STOP: cannot reserve the guest range\n'),
                          ['forbidden: stopped'])
 
+    def test_reports_the_ports_own_assertion_spelling(self):
+        # The port writes "Assertion Failed!" (capital F), so the pattern must not be case-sensitive.
+        self.assertEqual(macos_check.check_log(GOOD + 'GPU [Debug] <Critical> buffer.cpp:125 Create: '
+                                                    'Assertion Failed!\n'),
+                         ['forbidden: assertion'])
+
     def test_reports_a_traceback(self):
         self.assertEqual(macos_check.check_log(GOOD + 'Traceback (most recent call last):\n'),
                          ['forbidden: python traceback'])
@@ -58,6 +64,28 @@ class CheckLog(unittest.TestCase):
     def test_reports_an_early_exit(self):
         self.assertEqual(macos_check.check_log(GOOD, returncode=-6),
                          ['forbidden: exited before the deadline (rc -6)'])
+
+
+class RunResult(unittest.TestCase):
+    def test_run_returns_problems_and_log(self):  # the result reads, and still unpacks
+        problems, log = macos_check.run(ROOT, seconds=1.0,
+                                        command=['bash', '-c', 'echo "BPE heap guard on heap x"'])
+        self.assertIsInstance(problems, list)
+        self.assertIn('BPE heap guard on heap x', log)
+
+
+class WindowMarkerContract(unittest.TestCase):
+    """The window marker is a contract between gpu/shim/window.cpp and macos_check.MARKERS."""
+
+    def test_the_marker_matches_the_line_window_cpp_prints(self):  # Standing contract, pinned
+        source = (ROOT / 'gpu' / 'shim' / 'window.cpp').read_text()
+        self.assertIn('"Window %dx%d %s: relative mouse %s, grab %s\\n"', source)
+        pattern = dict(macos_check.MARKERS)['windowed, unlocked cursor']
+        line = 'Window %dx%d %s: relative mouse %s, grab %s' % (1280, 720, 'windowed', 'off', 'off')
+        self.assertRegex(line, pattern)
+        # And the states the format is fed: fail a gate that would accept a grabbed cursor.
+        for state in ('windowed', 'fullscreen', 'on', 'off'):
+            self.assertIn(f'"{state}"', source)
 
 
 class ProcessControl(unittest.TestCase):

@@ -343,9 +343,11 @@ def platform_label():
 
 def shadps4_saves_roots():
     """The roots shadps4_saves() walks: the port's neighbours, the home folder, Application
-    Support (where shadPS4 keeps its saves on macOS) and Windows' APPDATA."""
-    return [PORT_DIR.parent, Path.home(), Path.home() / 'Library' / 'Application Support',
-            Path(os.environ.get('APPDATA', Path.home()))]
+    Support (where shadPS4 keeps its saves on macOS) and Windows' APPDATA. Deduplicated: with
+    APPDATA unset they are all Path.home(), and walking a root twice doubles the matches."""
+    roots = [PORT_DIR.parent, Path.home(), Path.home() / 'Library' / 'Application Support',
+             Path(os.environ.get('APPDATA', Path.home()))]
+    return list(dict.fromkeys(roots))
 
 
 def shadps4_saves():

@@ -5,6 +5,9 @@
 # again (and to keep the manifest install enabled when it must).
 set -euo pipefail
 dir=${1:?usage: vcpkg_ready.sh <installed-triplet-dir>}
+# The probe samples two artifacts rather than every dependency: it answers "may build.sh skip the
+# manifest install?", and a dependency missing while these two are present surfaces at link time
+# as an undefined symbol, not here. Add a name when a link failure starts needing it.
 missing=''
 for name in libSDL3.a libZydis.a; do
     [[ -f $dir/lib/$name ]] || missing="${missing:+$missing }$name"

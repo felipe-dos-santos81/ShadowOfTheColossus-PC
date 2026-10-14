@@ -36,13 +36,26 @@
 - `tools/macos_check.py` — new. The acceptance gate: marker table, log checker, live runner. One responsibility: decide whether a captured run is acceptable.
 - `tests/test_macos_check.py` — new. Feeds synthetic logs to the checker; no GPU needed.
 - `gpu/shim/window.cpp` — modified. One added log line reporting the live windowed/mouse state (the only way the gate can observe SDL state from outside the process).
-- `sotc.py` — modified. `select_sys_modules()` extracted from `main()`; `extract_pkg()` gains an injectable `tool` and stops `unlink()`ing a real directory.
+- `sotc.py` — modified. `select_sys_modules()` extracted from `main()`; `extract_pkg()` stops `unlink()`ing a real directory.
 - `tests/test_sotc_modules.py`, `tests/test_sotc_pkg.py` — new.
 - `launcher/sotc_launcher_win.py` — modified. `game_environment()` mouse default, `shadps4_saves_roots()`, `platform_label()`.
 - `tools/vcpkg_ready.sh` — new. Answers "is the vcpkg install complete?" by artifact, not by directory.
 - `tests/test_vcpkg_ready.py` — new.
 - `build.sh` — modified. Uses `tools/vcpkg_ready.sh` to decide `-DVCPKG_MANIFEST_INSTALL`.
 - `README.md` — modified. A macOS "build, run, verify" section in both language halves.
+
+**As built (after the code review).** The interfaces below are the plan as written; these are the
+deltas the review settled, so a reader does not follow a signature that no longer exists:
+
+- `run()` returns a `Run(problems, log)` NamedTuple, not `(ok, log)`, and has no `env` parameter.
+  `check_log()` takes `returncode=None`: a run the gate had to end is acceptable, one that ended
+  itself before the deadline is not.
+- `extract_pkg(pkg, out)` has no `tool` parameter: tests place a stub at `out/pkgtool/PkgTool.Core`,
+  which is where the real search looks, so the seam is the filesystem rather than an argument.
+- The gate's `assertion` pattern is case-insensitive (`[Aa]ssertion [Ff]ailed`) because the port
+  writes `Assertion Failed!`.
+- The windowed-mode clamp lives in `gpu/shim/window_scale.h` with `tests/test_window_scale.cpp`
+  pinning it, so `window.cpp`'s marker line is no longer the only statement of that behaviour.
 
 ---
 
@@ -273,7 +286,7 @@ git commit -m "feat(macos): make sound-module selection a tested outcome and doc
   - `game_environment(s)` reads `s.get('mouse', False)`.
   - `launcher.shadps4_saves_roots() -> list[Path]` — the roots `shadps4_saves()` walks, including `Path.home() / 'Library' / 'Application Support'` on macOS.
   - `launcher.platform_label() -> str` — the sidebar label, without the word `Windows` on POSIX.
-  - `sotc.extract_pkg(pkg: Path, out: Path, tool: Path | None = None) -> Path` — `tool` defaults to the existing search; when `out/CUSA08809` exists as a real directory lacking `eboot.bin` it is removed with `shutil.rmtree` instead of `unlink()`.
+  - `sotc.extract_pkg(pkg: Path, out: Path) -> Path` — the tool is discovered at `out/pkgtool/PkgTool.Core` (or the sibling checkout's copy); when `out/CUSA08809` exists as a real directory lacking `eboot.bin` it is removed with `shutil.rmtree` instead of `unlink()`.
 
 - [ ] **Step 1: Write the failing tests**
 

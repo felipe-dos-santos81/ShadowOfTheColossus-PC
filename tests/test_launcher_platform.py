@@ -122,6 +122,18 @@ class PosixLauncher(unittest.TestCase):
         self.assertIn(Path.home() / 'Library' / 'Application Support',
                       launcher.shadps4_saves_roots())
 
+    def test_save_roots_are_deduplicated(self):
+        # With APPDATA unset three of the four roots are Path.home(): walking it three times
+        # doubles and triples every match in the save list.
+        saved = dict(os.environ)
+        try:
+            os.environ.pop('APPDATA', None)
+            roots = launcher.shadps4_saves_roots()
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(len(roots), len(set(roots)))
+
     def test_sidebar_label_is_not_windows_on_posix(self):
         self.assertNotIn('Windows', launcher.platform_label())
 
