@@ -47,6 +47,10 @@ int bbgpu_mouse_take(float *dx, float *dy, unsigned *buttons);
 int bbgpu_overlay_captures_input(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
+#ifdef __APPLE__
+/* Process main thread on macOS (Cocoa): waits for bbgpu_init, creates the window, pumps events. */
+void bbgpu_run_window_loop(void);
+#endif
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <stdatomic.h>
+#include <cpuid.h>
+#include <pthread.h>
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #include "gpu/sotc/sotc_patches.h"
@@ -18,15 +22,29 @@
 #include <mmsystem.h>
 #else
 #include <sys/mman.h>
-#include <malloc.h>
 #include <unistd.h>
 #include <signal.h>
-#include <ucontext.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <execinfo.h>
+#ifdef __APPLE__
+#include <sys/ucontext.h>
+#include <sys/sysctl.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#undef round_page
+#define CTX_RIP(uc) ((uintptr_t)(uc)->uc_mcontext->__ss.__rip)
+#define CTX_RBP(uc) ((uintptr_t)(uc)->uc_mcontext->__ss.__rbp)
+#define CTX_RDI(uc) ((uintptr_t)(uc)->uc_mcontext->__ss.__rdi)
+#else
+#include <malloc.h>
+#include <ucontext.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#define CTX_RIP(uc) ((uintptr_t)(uc)->uc_mcontext.gregs[REG_RIP])
+#define CTX_RBP(uc) ((uintptr_t)(uc)->uc_mcontext.gregs[REG_RBP])
+#define CTX_RDI(uc) ((uintptr_t)(uc)->uc_mcontext.gregs[REG_RDI])
+#endif
 #endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
@@ -51,17 +69,18 @@ static uint64_t read64(FILE *f) {
     return n;
 }
 static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_size - 1); }
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 /* sotc: the PS4 maps the executable at 0x400000, and Shadow of the Colossus packs pointers
- * to its static data into 31 bits (bit 31 selects a heap-relative form). Windows already
- * uses 0x400000 before main, so, as shadPS4 does, the image goes to the first free range
- * above it, which must end below 2 GiB. It is claimed first thing in main, before the C
- * runtime, the drivers or anything else allocate there. */
+ * to its static data into 31 bits (bit 31 selects a heap-relative form). Windows and macOS
+ * (linked with -Wl,-pagezero_size,0x400000) may already have mappings above 0x400000 before
+ * main, so the image goes to the first free 256 MiB range above it that ends below 2 GiB.
+ * It is claimed first thing in main before drivers or heaps allocate there. */
 #define EBOOT_MIN UINT64_C(0x400000)
 #define EBOOT_LIMIT UINT64_C(0x80000000)
 #define EBOOT_RESERVATION (UINT64_C(256) << 20)
 static void *eboot_reservation;
 static void reserve_eboot_range(void) {
+#ifdef _WIN32
     for (uintptr_t at=EBOOT_MIN; at+EBOOT_RESERVATION<=EBOOT_LIMIT;) {
         MEMORY_BASIC_INFORMATION m;
         if (!VirtualQuery((void *)at,&m,sizeof(m))) return;
@@ -72,14 +91,39 @@ static void reserve_eboot_range(void) {
         }
         at=end;
     }
+#else
+    for (uintptr_t at=EBOOT_MIN; at+EBOOT_RESERVATION<=EBOOT_LIMIT;) {
+        mach_vm_address_t addr=at;
+        mach_vm_size_t size=0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj=MACH_PORT_NULL;
+        kern_return_t kr=mach_vm_region(mach_task_self(),&addr,&size,VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&info,&count,&obj);
+        uintptr_t gap_end=(kr==KERN_SUCCESS) ? (uintptr_t)addr : EBOOT_LIMIT;
+        if (gap_end>EBOOT_LIMIT) gap_end=EBOOT_LIMIT;
+        if (gap_end>at && gap_end-at>=EBOOT_RESERVATION) {
+            void *p=mmap((void *)at,EBOOT_RESERVATION,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_NORESERVE,-1,0);
+            if (p!=MAP_FAILED) { eboot_reservation=p; return; }
+        }
+        if (kr!=KERN_SUCCESS) break;
+        at=((uintptr_t)addr+(uintptr_t)size+0xffff)&~(uintptr_t)0xffff;
+    }
+#endif
 }
 /* The image (eboot, linked modules, patch trampolines) below 2 GiB. */
 static void *allocate_image(size_t size) {
     if (!eboot_reservation) fail("no free 256 MiB range below 2 GiB for the eboot");
     if (size > EBOOT_RESERVATION) fail("the image does not fit the eboot reservation");
+#ifdef _WIN32
     void *p=VirtualAlloc(eboot_reservation, size, MEM_COMMIT, PAGE_READWRITE);
     if (!p) fail("cannot commit the eboot range");
     printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need); loader at %p\n",p,(void *)GetModuleHandleA(NULL));
+#else
+    void *p=mmap(eboot_reservation, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (p == MAP_FAILED) fail("cannot commit the eboot range");
+    printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need); loader at %p\n",p,(void *)allocate_image);
+#endif
     return p;
 }
 #endif
@@ -117,7 +161,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     uintptr_t caller=(uintptr_t)__builtin_return_address(0)-(uintptr_t)image;
     for (uint64_t m=0;m<module_count;++m)
         if (caller>=modules[m].base && caller-modules[m].base<modules[m].size)
-            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n",m,m==0 ? "libc.prx" : "system module",caller-modules[m].base);
+            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n",m,m==0 ? "libc.prx" : "system module",(uintptr_t)(caller-modules[m].base));
     runtime_report();
     puts(entered_game ? "Original guest entry instructions executed; game initialization is incomplete." :
                         "Native libc initialization is incomplete; game entry has not run.");
@@ -127,10 +171,35 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
 #ifndef _WIN32
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
-__asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
+#ifdef __APPLE__
+#define ASM_NAME(name) "_" name
+#else
+#define ASM_NAME(name) name
+#endif
+__asm__(".text\n.globl " ASM_NAME("enter_on_stack") "\n" ASM_NAME("enter_on_stack") ":\n"
         " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
         " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
+#endif
+#ifdef __APPLE__
+static int macos_version_ok(const char *version) {
+    int major=0, minor=0;
+    if (sscanf(version,"%d.%d",&major,&minor)<1) return 0;
+    return major>15 || (major==15 && minor>=4);
+}
+static int rosetta_ok(void) {
+    int translated=0; size_t n=sizeof(translated);
+    if (sysctlbyname("sysctl.proc_translated",&translated,&n,NULL,0) || !translated) return 0;
+    char version[32]=""; n=sizeof(version);
+    sysctlbyname("kern.osproductversion",version,&n,NULL,0);
+    if (macos_version_ok(version)) return 1;
+    fprintf(stderr,"STOP: Rosetta 2 on macOS %s cannot run the game: macOS 15.4 or later is needed (AVX2, BMI)\n",version);
+    exit(24);
+}
+static void check_cpu(void) {
+    if (getenv("BB_SKIP_CPU_CHECK")) return;
+    if (rosetta_ok()) { puts("CPU: x86-64 under Rosetta 2 (AVX2, BMI1, LZCNT and MOVBE translated)"); }
+}
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
 /* sotc: with the user's own libSceNgs2/libSceUlt linked (link_modules.py --sys-modules) their
@@ -460,6 +529,7 @@ static void choose_heap(void) {
         }
     }
     heap_chosen=best;
+    runtime_sotc_set_heap(best);
     fprintf(stderr,"Runtime: BPE heap guard on heap %p (%ld of %d frees)\n",(void *)best,best_count,HEAP_HOOK_CALLS);
     for (int i=0;i<8 && heap_seen[i].heap;++i) {
         uint64_t words[0x10]={0};
@@ -471,7 +541,6 @@ static void choose_heap(void) {
                 (unsigned long long)words[8]);
     }
 }
-uintptr_t runtime_sotc_heap(void) { return heap_chosen; }
 static int heap_hook_trap(EXCEPTION_POINTERS *info) {
     CONTEXT *c=info->ContextRecord;
     if (info->ExceptionRecord->ExceptionCode==EXCEPTION_SINGLE_STEP) {
@@ -589,8 +658,83 @@ static LONG vectored_fault_impl(EXCEPTION_POINTERS *info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
+#endif
+/* sotc: on POSIX/macOS, the BPE heap hook uses a trampoline at the end of the trampoline buffer
+ * (before the cmdline slot) instead of runtime INT3 + single-step traps. */
+#define SOTC_TRAMPOLINE_SIZE (UINT64_C(16) << 20)
+#ifndef _WIN32
+#define HEAP_FREE_OFFSET 0x495e0
+const unsigned char *runtime_memory_backing_pointer(uintptr_t address);
+#define HEAP_HOOK_CALLS 2000
+static _Atomic int heap_hook_calls, heap_hook_done;
+static struct { _Atomic uintptr_t heap; _Atomic int count; } heap_seen[8];
+static void choose_heap(void) {
+    uintptr_t best=0; int best_count=0;
+    for (int i=0;i<8;++i) {
+        uintptr_t h=atomic_load(&heap_seen[i].heap);
+        int c=atomic_load(&heap_seen[i].count);
+        uint64_t size=0;
+        const unsigned char *backing=h ? runtime_memory_backing_pointer(h+0x30) : NULL;
+        if (backing) memcpy(&size,backing,8);
+        else if (h && h-(uintptr_t)image<0x20000000) memcpy(&size,(const void *)(h+0x30),8);
+        if (h && size>=0x1000000 && size<0x100000000ull && c>best_count) {
+            best=h; best_count=c;
+        }
+    }
+    runtime_sotc_set_heap(best);
+    fprintf(stderr,"Runtime: BPE heap guard on heap %p (%d of %d frees)\n",(void *)best,best_count,HEAP_HOOK_CALLS);
+}
+static ABI void record_heap_free(uintptr_t heap) {
+    if (atomic_load_explicit(&heap_hook_done,memory_order_relaxed)) return;
+    for (int i=0;i<8;++i) {
+        uintptr_t cur=atomic_load_explicit(&heap_seen[i].heap,memory_order_relaxed);
+        if (cur==heap) { atomic_fetch_add_explicit(&heap_seen[i].count,1,memory_order_relaxed); break; }
+        uintptr_t zero=0;
+        if (!cur && atomic_compare_exchange_strong(&heap_seen[i].heap,&zero,heap)) {
+            atomic_fetch_add_explicit(&heap_seen[i].count,1,memory_order_relaxed); break;
+        }
+    }
+    if (atomic_fetch_add_explicit(&heap_hook_calls,1,memory_order_relaxed)+1>=HEAP_HOOK_CALLS) {
+        if (!atomic_exchange(&heap_hook_done,1)) choose_heap();
+    }
+}
+static void install_heap_hook(uint64_t size) {
+    static const unsigned char expected[8]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
+    const char *v=getenv("SOTC_HEAP_GUARD");
+    if ((v && v[0]=='0') || size<=HEAP_FREE_OFFSET+8 || memcmp(image+HEAP_FREE_OFFSET,expected,sizeof(expected))) return;
+    unsigned char *site=image+HEAP_FREE_OFFSET;
+    unsigned char *stub=image+round_page(size)+SOTC_TRAMPOLINE_SIZE-16384-128;
+    /* Stub: preserve caller-saved registers and red zone, call record_heap_free(rdi), run
+     * replaced 6 bytes (push rbp; mov rbp,rsp; push r15), jump back to site+6. */
+    static const unsigned char prefix[]={
+        0x48,0x8d,0x64,0x24,0x80,             /* lea rsp,[rsp-128] */
+        0x50,0x51,0x52,0x56,0x57,             /* push rax,rcx,rdx,rsi,rdi */
+        0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53, /* push r8,r9,r10,r11 */
+        0x48,0xb8                             /* movabs rax, record_heap_free */
+    };
+    static const unsigned char suffix[]={
+        0xff,0xd0,                            /* call rax */
+        0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58, /* pop r11,r10,r9,r8 */
+        0x5f,0x5e,0x5a,0x59,0x58,             /* pop rdi,rsi,rdx,rcx,rax */
+        0x48,0x8d,0xa4,0x24,0x80,0x00,0x00,0x00, /* lea rsp,[rsp+128] */
+        0x55,0x48,0x89,0xe5,0x41,0x57,        /* push rbp; mov rbp,rsp; push r15 */
+        0xe9                                  /* jmp rel32 -> site+6 */
+    };
+    uintptr_t fn=(uintptr_t)record_heap_free;
+    unsigned char *p=stub;
+    memcpy(p,prefix,sizeof(prefix)); p+=sizeof(prefix);
+    memcpy(p,&fn,8); p+=8;
+    memcpy(p,suffix,sizeof(suffix)); p+=sizeof(suffix);
+    int32_t back=(int32_t)((site+6)-(p+4));
+    memcpy(p,&back,4);
+    int32_t to_stub=(int32_t)(stub-(site+5));
+    site[0]=0xe9; memcpy(site+1,&to_stub,4); site[5]=0x90;
+}
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
 /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
- * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
+ * the displacement becomes the TEB TLS slot that holds the guest TCB, on macOS the pthread
+ * key's TSD slot (runtime_thread.c). */
 uint32_t runtime_thread_tcb_offset(void);
 static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     static const unsigned char load[]={0x65,0x48,0x8b,0x04,0x25,0,0,0,0};
@@ -606,7 +750,6 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
 }
 #endif
 /* sotc: SSE4a and red-zone patches of the eboot (gpu/sotc), described by scripts/sotc_cpu.py. */
-#define SOTC_TRAMPOLINE_SIZE (UINT64_C(16) << 20)
 static void apply_sotc_cpu_patches(const char *path, const Segment *segments, uint64_t count, uint64_t size) {
     FILE *f=fopen(path,"rb");
     char magic[8];
@@ -656,8 +799,14 @@ static void apply_sotc_cmdline(const char *path, uint64_t size) {
 }
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
-    /* GPU page tracking (write-protected guest pages) is resolved first. */
-    if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
+    /* GPU page tracking (write-protected guest pages) is resolved first; macOS reports those
+     * faults as SIGBUS, Linux as SIGSEGV. */
+#ifdef __APPLE__
+    const int gpu_fault = sig == SIGSEGV || sig == SIGBUS;
+#else
+    const int gpu_fault = sig == SIGSEGV;
+#endif
+    if (gpu_enabled && gpu_fault && bbgpu_handle_fault(context, info->si_addr)) return;
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
@@ -668,9 +817,11 @@ static void fault(int sig, siginfo_t *info, void *context) {
         pthread_sigmask(SIG_UNBLOCK, &unblock, NULL);
         siglongjmp(*recover, 1);
     }
+    /* sotc: an SSE4a site the load-time patchers could not rewrite is interpreted. */
+    if (sig == SIGILL && image && sotc_handle_illegal(context)) return;
     /* The process is terminating: dladdr/snprintf are acceptable here. */
     ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    uintptr_t rip = CTX_RIP(uc);
     char line[512];
     Dl_info where;
     if (rip - (uintptr_t)image < 0x10000000)
@@ -697,7 +848,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
     _exit(128 + sig);
 }
 #endif
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 /* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
  * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
 static uintptr_t exe_base;
@@ -707,11 +858,11 @@ static void write_hex(char *out, uint64_t v) {
 }
 static void dump_frames(ucontext_t *uc) {
     char line[] = "  tid=0000000000000000 rip=0000000000000000 image-relative=0000000000000000 host-relative=0000000000000000\n";
-    uintptr_t rip=(uintptr_t)uc->uc_mcontext.gregs[REG_RIP], rbp=(uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+    uintptr_t rip=CTX_RIP(uc), rbp=CTX_RBP(uc);
     uint64_t tid=(uint64_t)gettid();
     /* First argument register: the lock address when a thread waits on a futex. */
     char arg[]="  tid=0000000000000000 rdi=0000000000000000\n";
-    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)uc->uc_mcontext.gregs[REG_RDI]);
+    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)CTX_RDI(uc));
     { ssize_t written_=write(2,arg,sizeof(arg)-1); (void)written_; }
     for (int depth=0; depth<24; ++depth) {
         write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
@@ -833,28 +984,43 @@ void runtime_restart(void) {
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");
+#ifdef __APPLE__
+    for (int fd=3, limit=getdtablesize(); fd<limit; ++fd) close(fd);
+#else
     syscall(SYS_close_range, 3u, ~0u, 0u);
+#endif
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
     _exit(1);
 #endif
 }
 
-int main(int argc, char **argv) {
+#ifdef __APPLE__
+/* macOS: Cocoa accepts window and event calls on the main thread only. The loader, and with it
+ * the guest's main thread (module initializers, then the entry), runs on a pthread; the process
+ * main thread creates the window when bbgpu_init asks for it and pumps its events. */
+#define PROBE_MAIN static int probe_main
+#else
+#define PROBE_MAIN int main
+#endif
+PROBE_MAIN(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     reserve_eboot_range();
 #endif
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
-#ifdef _WIN32
+#ifdef __APPLE__
+    check_cpu();
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
-     * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
+     * TCB needs one of the TLS slots before drivers take them. */
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
 #endif
@@ -892,6 +1058,12 @@ int main(int argc, char **argv) {
     }
     if (app0) {
         runtime_file_configure(app0, user_dir ? user_dir : "user");
+#ifndef _WIN32
+        if (!getenv("BB_GPU_USER_DIR")) {
+            char full[PATH_MAX];
+            if (realpath(user_dir ? user_dir : "user", full)) setenv("BB_GPU_USER_DIR", full, 0);
+        }
+#endif
         char sfo[4096], id[16]="";
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
@@ -915,9 +1087,12 @@ int main(int argc, char **argv) {
     (void)timeout_seconds; /* no watchdog on Windows */
 #else
     page_size = (size_t)sysconf(_SC_PAGESIZE);
-    struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
+    struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
+#ifdef __APPLE__
+    if (timeout_seconds) puts("Runtime: --timeout watchdog is not available on macOS");
+#else
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
     struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;
@@ -925,6 +1100,7 @@ int main(int argc, char **argv) {
     struct sigaction alarm_action = {0}; alarm_action.sa_sigaction = watchdog; alarm_action.sa_flags = SA_SIGINFO;
     sigemptyset(&alarm_action.sa_mask); sigaction(SIGALRM, &alarm_action, NULL);
     alarm(timeout_seconds); /* 0 disables the watchdog */
+#endif
 #endif
     FILE *f = fopen(argv[1], "rb");
     if (!f) fail("cannot open boot file; run prepare.py first");
@@ -1025,7 +1201,7 @@ int main(int argc, char **argv) {
         }
     }
     /* sotc: the CPU patch trampolines follow the image (rel32 jumps reach them). */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     image = allocate_image(round_page(size) + SOTC_TRAMPOLINE_SIZE);
 #else
     image = allocate(round_page(size) + SOTC_TRAMPOLINE_SIZE);
@@ -1104,12 +1280,16 @@ int main(int argc, char **argv) {
         _exit(0);
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
-#ifdef _WIN32
-    printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+#if defined(_WIN32) || defined(__APPLE__)
+    printf("Guest TCB loads redirected to the host TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
     if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
     if (sotc_cmdline) apply_sotc_cmdline(sotc_cmdline, size);
+#ifdef _WIN32
     if (sotc_cpu) install_heap_hook();
+#else
+    if (sotc_cpu) install_heap_hook(size);
+#endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
@@ -1144,7 +1324,7 @@ int main(int argc, char **argv) {
     }
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
-    struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
+    static struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
 #ifdef _WIN32
     typedef void (ABI *Entry)(void *, void (ABI *)(void));
     ((Entry)(image + entry))(&params, guest_exit);
@@ -1156,4 +1336,25 @@ int main(int argc, char **argv) {
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
 #endif
     fail("entry unexpectedly returned");
+    return 1;
 }
+#ifdef __APPLE__
+static void *loader_thread(void *arg) {
+    char **argv=arg;
+    int argc=0;
+    while (argv[argc]) ++argc;
+    exit(probe_main(argc, argv));
+}
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return probe_main(argc, argv);
+    reserve_eboot_range();
+    runtime_memory_reserve();
+    /* Module initializers run on this stack before the entry switches to the low guest stack. */
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) || pthread_attr_setstacksize(&attr,(size_t)32<<20)) { perror("STOP: loader thread attributes"); return 1; }
+    pthread_t loader;
+    if (pthread_create(&loader,&attr,loader_thread,argv)) { perror("STOP: cannot start the loader thread"); return 1; }
+    bbgpu_run_window_loop(); /* ends the process when the window is closed */
+    return 0;
+}
+#endif

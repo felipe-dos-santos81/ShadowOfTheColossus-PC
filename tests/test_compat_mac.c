@@ -7,6 +7,11 @@
 #include <stdio.h>
 #include <time.h>
 #include <errno.h>
+#ifdef __APPLE__
+#include <sys/mman.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 
 static pthread_barrier_t gate;
 static void *arrive(void *arg) { (void)arg; int e = pthread_barrier_wait(&gate); assert(e == 0 || e == PTHREAD_BARRIER_SERIAL_THREAD); return NULL; }
@@ -57,6 +62,30 @@ int main(void) {
             int ok = major>15 || (major==15 && minor>=4);
             assert(ok==expected[i]);
         }
+    }
+    /* Sub-2 GiB eboot reservation (probe.c reserve_eboot_range): 256 MiB below 0x80000000. */
+    {
+        const uint64_t need = UINT64_C(256) << 20;
+        void *res = MAP_FAILED;
+        for (uintptr_t at = 0x400000; at + need <= 0x80000000ULL;) {
+            mach_vm_address_t addr = at;
+            mach_vm_size_t size = 0;
+            vm_region_basic_info_data_64_t info;
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t obj = MACH_PORT_NULL;
+            kern_return_t kr = mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
+                                              (vm_region_info_t)&info, &count, &obj);
+            uintptr_t gap_end = (kr == KERN_SUCCESS) ? (uintptr_t)addr : 0x80000000ULL;
+            if (gap_end > 0x80000000ULL) gap_end = 0x80000000ULL;
+            if (gap_end > at && gap_end - at >= need) {
+                res = mmap((void *)at, need, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+                break;
+            }
+            if (kr != KERN_SUCCESS) break;
+            at = ((uintptr_t)addr + (uintptr_t)size + 0xffff) & ~(uintptr_t)0xffff;
+        }
+        assert(res != MAP_FAILED && (uintptr_t)res >= 0x400000 && (uintptr_t)res + need <= 0x80000000ULL);
+        assert(munmap(res, need) == 0);
     }
 #endif
     puts("compat_mac: PASS");

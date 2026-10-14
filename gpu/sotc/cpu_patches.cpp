@@ -945,7 +945,7 @@ bool IsStaticPatchingEnabled() noexcept {
 
 } // namespace WindowsGuestRedZoneProtection
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
 
 namespace {
 
@@ -2350,14 +2350,12 @@ void RegisterPatchModule(void* module_ptr, u64 module_size, void* trampoline_are
 }
 
 void PrePatchInstructions(u64 segment_addr, u64 segment_size) {
-#if !defined(__APPLE__)
-    // sotc: also on Windows. Only CPU patches are left in the table, and patching them ahead
-    // of time keeps every long EXTRQ/INSERTQ from going through an exception (which clobbers
-    // the guest red zone on Windows) on its first execution.
+    // sotc: also on Windows and macOS. Only CPU patches are left in the table, and patching them
+    // ahead of time keeps every long EXTRQ/INSERTQ from going through an exception on its first
+    // execution.
     if (!Patches.empty()) {
         TryPatchAot(reinterpret_cast<void*>(segment_addr), segment_size);
     }
-#endif
 }
 
 } // namespace Core
