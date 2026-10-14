@@ -111,6 +111,20 @@ class PosixLauncher(unittest.TestCase):
     def test_language_fallback(self):
         self.assertIn(launcher.system_language(), ('pt', 'en'))
 
+    def test_mouse_defaults_off_when_unset(self):
+        # game_environment indexes its settings directly, so the real caller always passes
+        # APP_DEFAULTS; the finding is only that 'mouse' defaults to True there.
+        settings = {key: value for key, value in launcher.APP_DEFAULTS.items() if key != 'mouse'}
+        settings['game_dir'] = '/tmp/game'
+        self.assertEqual(launcher.game_environment(settings)['SOTC_MOUSE'], '0')
+
+    def test_save_roots_include_macos_shadps4(self):
+        self.assertIn(Path.home() / 'Library' / 'Application Support',
+                      launcher.shadps4_saves_roots())
+
+    def test_sidebar_label_is_not_windows_on_posix(self):
+        self.assertNotIn('Windows', launcher.platform_label())
+
 
 if __name__ == '__main__':
     unittest.main()

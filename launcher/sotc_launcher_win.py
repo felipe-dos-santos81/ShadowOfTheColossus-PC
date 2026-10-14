@@ -321,7 +321,7 @@ def game_environment(s):
     else:
         env['BB_RCAS'] = '1'
         env['BB_RCAS_ATTENUATION'] = str(s.get('sharpness') or '250')
-    env['SOTC_MOUSE'] = '1' if s.get('mouse', True) else '0'
+    env['SOTC_MOUSE'] = '1' if s.get('mouse', False) else '0'
     env['SOTC_MOUSE_SENS'] = str(s.get('mouse_sens') or '1.0')
     env['SOTC_MOUSE_INVERT'] = '1' if s.get('mouse_invert') else '0'
     if str(s.get('gamepad', '')).strip():
@@ -336,11 +336,22 @@ def game_environment(s):
     return env
 
 
+def platform_label():
+    """The sidebar label under the title: the port's name for the platform it runs on."""
+    return _('port nativo', 'native port') + (' · Windows' if WINDOWS else '')
+
+
+def shadps4_saves_roots():
+    """The roots shadps4_saves() walks: the port's neighbours, the home folder, Application
+    Support (where shadPS4 keeps its saves on macOS) and Windows' APPDATA."""
+    return [PORT_DIR.parent, Path.home(), Path.home() / 'Library' / 'Application Support',
+            Path(os.environ.get('APPDATA', Path.home()))]
+
+
 def shadps4_saves():
     """Save folders of shadPS4 installations next to the port or in the usual places."""
-    roots = [PORT_DIR.parent, Path.home(), Path(os.environ.get('APPDATA', Path.home()))]
     found = []
-    for root in roots:
+    for root in shadps4_saves_roots():
         for pattern in ('*/user/home/*/savedata/' + GAME_ID, '*/*/user/home/*/savedata/' + GAME_ID,
                         'shadPS4/savedata/*/' + GAME_ID):
             try:
@@ -573,7 +584,7 @@ class Launcher:
         side.pack_propagate(False)
         tk.Label(side, text='SHADOW OF\nTHE COLOSSUS', bg=BG, fg=GOLD, font=('Georgia', 15), justify='left').pack(
             anchor='w', padx=22, pady=(24, 0))
-        tk.Label(side, text=_('port nativo · Windows', 'native port · Windows') + f'  ·  v{VERSION}', bg=BG, fg=MUTED,
+        tk.Label(side, text=platform_label() + f'  ·  v{VERSION}', bg=BG, fg=MUTED,
                  font=('Segoe UI', 9)).pack(anchor='w', padx=22, pady=(2, 20))
         self.nav, self.current_page = {}, None
         for name, title in (('play', _('Jogar', 'Play')), ('game', _('Jogo e saves', 'Game & saves')),
