@@ -81,6 +81,7 @@ static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_s
 static void *eboot_reservation;
 static void reserve_eboot_range(void) {
 #ifdef _WIN32
+    if (eboot_reservation) return; /* main and probe_main both call this */
     for (uintptr_t at=EBOOT_MIN; at+EBOOT_RESERVATION<=EBOOT_LIMIT;) {
         MEMORY_BASIC_INFORMATION m;
         if (!VirtualQuery((void *)at,&m,sizeof(m))) return;
@@ -92,23 +93,9 @@ static void reserve_eboot_range(void) {
         at=end;
     }
 #else
-    for (uintptr_t at=EBOOT_MIN; at+EBOOT_RESERVATION<=EBOOT_LIMIT;) {
-        mach_vm_address_t addr=at;
-        mach_vm_size_t size=0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t obj=MACH_PORT_NULL;
-        kern_return_t kr=mach_vm_region(mach_task_self(),&addr,&size,VM_REGION_BASIC_INFO_64,
-                                        (vm_region_info_t)&info,&count,&obj);
-        uintptr_t gap_end=(kr==KERN_SUCCESS) ? (uintptr_t)addr : EBOOT_LIMIT;
-        if (gap_end>EBOOT_LIMIT) gap_end=EBOOT_LIMIT;
-        if (gap_end>at && gap_end-at>=EBOOT_RESERVATION) {
-            void *p=mmap((void *)at,EBOOT_RESERVATION,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_NORESERVE,-1,0);
-            if (p!=MAP_FAILED) { eboot_reservation=p; return; }
-        }
-        if (kr!=KERN_SUCCESS) break;
-        at=((uintptr_t)addr+(uintptr_t)size+0xffff)&~(uintptr_t)0xffff;
-    }
+    /* compat_mac.c: the first free 256 MiB below 2 GiB, claimed once per process (main and
+     * probe_main both call this on macOS, and the repeat call must not reserve a second block). */
+    eboot_reservation=compat_reserve_eboot_range();
 #endif
 }
 /* The image (eboot, linked modules, patch trampolines) below 2 GiB. */

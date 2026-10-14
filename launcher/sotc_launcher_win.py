@@ -111,6 +111,13 @@ def system_language():
 windows_language = system_language
 
 
+def wheel_steps(delta):
+    """Scroll lines for a Tk <MouseWheel> delta. Tk reports 120 per notch on Windows and X11 and
+    1 per notch on macOS (Aqua), so the raw division truncates macOS notches to zero."""
+    if not delta:
+        return 0
+    return int(-delta / 120) or (-1 if delta > 0 else 1)
+
 # ---------------------------------------------------------------------------------------------
 # Settings, passed to sotc.py as environment variables.
 
@@ -615,7 +622,7 @@ class Launcher:
         page = self.pages.get(self.current_page)
         if hasattr(page, 'scroll') and not isinstance(event.widget, (self.tk.Text, self.ttk.Combobox)) \
                 and 'popdown' not in str(event.widget):
-            page.scroll(int(-event.delta / 120))
+            page.scroll(wheel_steps(event.delta))
 
     def show(self, name):
         for page in self.pages.values():
@@ -1556,6 +1563,7 @@ class GameJob:
         self.process = process
         self.handle = None
         self.kill_after = kill_after
+        self.timer = None
         if WINDOWS:
             kernel32 = ctypes.windll.kernel32
             kernel32.CreateJobObjectW.restype = ctypes.c_void_p
@@ -1577,9 +1585,17 @@ class GameJob:
             except ProcessLookupError:
                 pass
         kill(signal.SIGTERM)
-        threading.Timer(self.kill_after, kill, args=(signal.SIGKILL,)).start()
+        # SIGKILL escalation if the group ignores SIGTERM. A daemon timer, cancelled in close():
+        # left running it would keep the interpreter alive for kill_after seconds, and could
+        # SIGKILL a recycled process group once the game has already exited.
+        self.timer = threading.Timer(self.kill_after, kill, args=(signal.SIGKILL,))
+        self.timer.daemon = True
+        self.timer.start()
 
     def close(self):
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
         if self.handle:
             ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(self.handle))
             self.handle = None

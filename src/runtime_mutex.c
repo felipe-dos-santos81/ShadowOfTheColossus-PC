@@ -9,7 +9,7 @@
 #include <time.h>
 typedef struct { int type; } GuestAttr;
 /* sotc: owner and lock site are kept for hang reports (long waits are reported). */
-typedef struct { pthread_mutex_t native; int type; unsigned long owner; void *site; unsigned depth; } GuestMutex;
+typedef struct { pthread_mutex_t native; unsigned long owner; void *site; unsigned depth; } GuestMutex;
 #ifdef _WIN32
 #include <windows.h>
 static unsigned long current_tid(void) { return GetCurrentThreadId(); }
@@ -69,7 +69,6 @@ static ABI int32_t mutex_init(GuestMutex **out, GuestAttr **attr, const char *na
     if (!e) e = pthread_mutex_init(&mutex->native, &native_attr);
     pthread_mutexattr_destroy(&native_attr);
     if (e) { runtime_guest_free(mutex); return orbis_error(e); }
-    mutex->type = type;
     *out = mutex; ++created; return 0;
 }
 static pthread_mutex_t static_init = PTHREAD_MUTEX_INITIALIZER;

@@ -1,5 +1,6 @@
-/* macOS compat polyfills (src/compat_mac.h): a timed lock times out, a barrier releases, and a
- * pthread key slot is readable through GS the way the patched guest TLS load reads it. */
+/* macOS compat polyfills (src/compat_mac.h): a timed lock times out, a barrier releases, a
+ * pthread key slot is readable through GS the way the patched guest TLS load reads it, and the
+ * eboot reservation below 2 GiB is claimed once per process. */
 #include "runtime.h"
 #include <assert.h>
 #include <pthread.h>
@@ -7,11 +8,6 @@
 #include <stdio.h>
 #include <time.h>
 #include <errno.h>
-#ifdef __APPLE__
-#include <sys/mman.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
-#endif
 
 static pthread_barrier_t gate;
 static void *arrive(void *arg) { (void)arg; int e = pthread_barrier_wait(&gate); assert(e == 0 || e == PTHREAD_BARRIER_SERIAL_THREAD); return NULL; }
@@ -63,29 +59,14 @@ int main(void) {
             assert(ok==expected[i]);
         }
     }
-    /* Sub-2 GiB eboot reservation (probe.c reserve_eboot_range): 256 MiB below 0x80000000. */
+    /* Sub-2 GiB eboot reservation: 256 MiB below 0x80000000, claimed once per process.
+     * probe.c calls reserve_eboot_range() from main() and again from probe_main(), so the
+     * second call must return the first block, not reserve a further 256 MiB. */
     {
         const uint64_t need = UINT64_C(256) << 20;
-        void *res = MAP_FAILED;
-        for (uintptr_t at = 0x400000; at + need <= 0x80000000ULL;) {
-            mach_vm_address_t addr = at;
-            mach_vm_size_t size = 0;
-            vm_region_basic_info_data_64_t info;
-            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-            mach_port_t obj = MACH_PORT_NULL;
-            kern_return_t kr = mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
-                                              (vm_region_info_t)&info, &count, &obj);
-            uintptr_t gap_end = (kr == KERN_SUCCESS) ? (uintptr_t)addr : 0x80000000ULL;
-            if (gap_end > 0x80000000ULL) gap_end = 0x80000000ULL;
-            if (gap_end > at && gap_end - at >= need) {
-                res = mmap((void *)at, need, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
-                break;
-            }
-            if (kr != KERN_SUCCESS) break;
-            at = ((uintptr_t)addr + (uintptr_t)size + 0xffff) & ~(uintptr_t)0xffff;
-        }
-        assert(res != MAP_FAILED && (uintptr_t)res >= 0x400000 && (uintptr_t)res + need <= 0x80000000ULL);
-        assert(munmap(res, need) == 0);
+        void *first = compat_reserve_eboot_range();
+        assert(first != NULL && (uintptr_t)first >= 0x400000 && (uintptr_t)first + need <= 0x80000000ULL);
+        assert(compat_reserve_eboot_range() == first);
     }
 #endif
     puts("compat_mac: PASS");

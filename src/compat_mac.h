@@ -50,6 +50,10 @@ static inline int compat_condattr_setclock(pthread_condattr_t *attr, clockid_t c
 #define pthread_condattr_setclock compat_condattr_setclock
 /* Thread names: one-argument form, the calling thread only. */
 #define pthread_setname_np(thread, name) pthread_setname_np(name)
+/* The eboot reservation: the first free 256 MiB below 2 GiB (Shadow of the Colossus packs static
+ * data pointers into 31 bits), claimed once per process. probe.c calls this from main() and again
+ * from probe_main(), so repeat calls must return the same block, not a fresh one. */
+void *compat_reserve_eboot_range(void);
 /* Barriers (tests/test_runtime.c). */
 typedef struct { pthread_mutex_t lock; pthread_cond_t wake; unsigned count, waiting, generation; } compat_barrier_t;
 #define pthread_barrier_t compat_barrier_t

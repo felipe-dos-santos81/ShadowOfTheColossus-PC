@@ -46,8 +46,13 @@ if [[ -z ${PYTHON:-} ]]; then
 fi
 if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1; fi
 # BB_GAME_DIR: the game's folder (eboot.bin, sce_module, ...); default next to this directory.
+# Shadow of the Colossus: a CUSA03173 tree keeps the Bloodborne pipeline below; otherwise (the
+# SotC default, including runtime_restart()'s bare `bash run.sh`) this hands over to sotc.py.
 game=${BB_GAME_DIR:-../CUSA03173}
-if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
+if [[ ! -f $game/eboot.bin ]]; then
+    if [[ -z ${BB_GAME_DIR:-} ]]; then exec "$PYTHON" ./sotc.py "$@"; fi
+    echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1
+fi
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \

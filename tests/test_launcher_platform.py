@@ -28,6 +28,27 @@ class PosixLauncher(unittest.TestCase):
         self.assertEqual(env['BB_FULLSCREEN'], '0')
         self.assertEqual(env['SOTC_MOUSE'], '0')
 
+    def test_game_job_close_cancels_kill_timer(self):
+        process = subprocess.Popen(['bash', '-c', 'sleep 30'], start_new_session=True)
+        job = launcher.GameJob(process, kill_after=30.0)
+        job.terminate()
+        process.wait(timeout=5)
+        timer = job.timer
+        self.assertIsNotNone(timer)
+        self.assertTrue(timer.daemon)
+        self.assertTrue(timer.is_alive())   # the SIGKILL escalation is still pending
+        job.close()
+        timer.join(timeout=5)               # cancel() lets the thread finish
+        self.assertFalse(timer.is_alive())
+
+    def test_run_sh_delegates_to_sotc_py_when_bb_game_dir_unset(self):
+        env = dict(os.environ, SOTC_GAME_DIR='/nonexistent/sotc-game')
+        env.pop('BB_GAME_DIR', None)
+        res = subprocess.run(['bash', str(ROOT / 'run.sh')], cwd=ROOT, env=env,
+                             capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('SOTC_GAME_DIR', res.stderr)
+
     def test_stop_ends_the_whole_process_group(self):
         process = subprocess.Popen(['bash', '-c', 'sleep 30 & echo $! ; wait'], stdout=subprocess.PIPE,
                                    start_new_session=True)
@@ -68,6 +89,17 @@ class PosixLauncher(unittest.TestCase):
             os.kill(child, 9)
             self.fail('the grandchild sleep survived Stop')
         job.close()
+
+    def test_wheel_steps_handles_macos_and_windows_deltas(self):
+        # Tk reports 120 per notch on Windows/X11 and 1 per notch on macOS (Aqua). The plain
+        # int(-delta / 120) this replaced truncated every macOS notch to 0: no scrolling at all.
+        self.assertEqual(int(-1 / 120), 0)
+        self.assertEqual(launcher.wheel_steps(120), -1)
+        self.assertEqual(launcher.wheel_steps(-120), 1)
+        self.assertEqual(launcher.wheel_steps(240), -2)
+        self.assertEqual(launcher.wheel_steps(1), -1)
+        self.assertEqual(launcher.wheel_steps(-1), 1)
+        self.assertEqual(launcher.wheel_steps(0), 0)
 
     def test_config_dir_is_per_platform(self):
         text = str(launcher.CONFIG_DIR)

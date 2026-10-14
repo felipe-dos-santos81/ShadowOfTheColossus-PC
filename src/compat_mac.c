@@ -3,8 +3,41 @@
 #ifdef __APPLE__
 #include <string.h>
 #include <sys/random.h>
+#include <sys/mman.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #undef getrusage /* the real one, for RUSAGE_SELF */
+
+/* Shadow of the Colossus packs pointers to its static data into 31 bits, so the eboot image and
+ * its trampolines must live below 2 GiB. The loader is linked with -Wl,-pagezero_size,0x400000 to
+ * shrink __PAGEZERO, and this claims the first free 256 MiB above 0x400000 that ends below
+ * 0x80000000. main() and probe_main() both call it, so the block is cached: a second call returns
+ * the first one instead of reserving a further 256 MiB. */
+#define EBOOT_MIN UINT64_C(0x400000)
+#define EBOOT_LIMIT UINT64_C(0x80000000)
+#define EBOOT_RESERVATION (UINT64_C(256) << 20)
+static void *eboot_range;
+void *compat_reserve_eboot_range(void) {
+    if (eboot_range) return eboot_range;
+    for (uintptr_t at=EBOOT_MIN; at+EBOOT_RESERVATION<=EBOOT_LIMIT;) {
+        mach_vm_address_t addr=at;
+        mach_vm_size_t size=0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj=MACH_PORT_NULL;
+        kern_return_t kr=mach_vm_region(mach_task_self(),&addr,&size,VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&info,&count,&obj);
+        uintptr_t gap_end=(kr==KERN_SUCCESS) ? (uintptr_t)addr : EBOOT_LIMIT;
+        if (gap_end>EBOOT_LIMIT) gap_end=EBOOT_LIMIT;
+        if (gap_end>at && gap_end-at>=EBOOT_RESERVATION) {
+            void *p=mmap((void *)at,EBOOT_RESERVATION,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_NORESERVE,-1,0);
+            if (p!=MAP_FAILED) { eboot_range=p; break; }
+        }
+        if (kr!=KERN_SUCCESS) break;
+        at=((uintptr_t)addr+(uintptr_t)size+0xffff)&~(uintptr_t)0xffff;
+    }
+    return eboot_range;
+}
 
 ssize_t compat_getrandom(void *buffer, size_t size, unsigned flags) {
     (void)flags;
