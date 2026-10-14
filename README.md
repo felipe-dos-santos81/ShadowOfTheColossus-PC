@@ -26,10 +26,12 @@ make build    # out/bb-probe e out/bb-gpu-capabilities
 make play     # prepara a imagem do jogo e abre a janela
 ```
 
-No macOS o renderizador precisa do driver **KosmicKrisp** (`make driver`, 20–40 minutos). O
-MoltenVK só serve para os testes de capacidades: ele não expõe *buffer device address*, então
-`vkGetBufferDeviceAddress` devolve 0 e o renderizador para. `make verify` roda o jogo por 30 s e
-confere o log; `make help` lista todos os alvos.
+No macOS o renderizador precisa do driver **KosmicKrisp** (`make driver`). O MoltenVK só serve para
+os testes de capacidades: ele não expõe *buffer device address*, então `vkGetBufferDeviceAddress`
+devolve 0 e o renderizador para. `make driver` compila o Mesa (20–40 minutos) ou, se você apontar
+`BB_KOSMICKRISP_URL` (com `BB_KOSMICKRISP_SHA256`) para o `.tar.gz` de [Releases](../../releases),
+instala o driver pronto em segundos; `make driver-dist` empacota o driver que você compilou.
+`make verify` roda o jogo por 30 s e confere o log; `make help` lista todos os alvos.
 
 Para jogar com o pacote pronto, baixe o `SotC-PC.zip` de [Releases](../../releases),
 descompacte e abra o **`SotC.exe`**. Na primeira vez o lançador procura sozinho nos discos do PC
@@ -112,10 +114,12 @@ make build    # out/bb-probe and out/bb-gpu-capabilities
 make play     # prepare the game image and open the window
 ```
 
-On macOS the renderer needs Mesa's **KosmicKrisp** driver (`make driver`, 20–40 minutes). MoltenVK
-only serves the capability checks: it does not expose buffer device address, so
-`vkGetBufferDeviceAddress` returns 0 and the renderer stops. `make verify` runs the game for 30 s
-and checks the log; `make help` lists every target.
+On macOS the renderer needs Mesa's **KosmicKrisp** driver (`make driver`). MoltenVK only serves the
+capability checks: it does not expose buffer device address, so `vkGetBufferDeviceAddress` returns 0
+and the renderer stops. `make driver` builds Mesa (20–40 minutes) or, pointed at the `.tar.gz` from
+[Releases](../../releases) with `BB_KOSMICKRISP_URL` (and `BB_KOSMICKRISP_SHA256`), installs a
+prebuilt driver in seconds; `make driver-dist` packages the one you built. `make verify` runs the
+game for 30 s and checks the log; `make help` lists every target.
 
 To play with the packaged build, download `SotC-PC.zip` from [Releases](../../releases), unzip it
 and run **`SotC.exe`**. On first start the launcher searches the PC's drives for the game folder,
@@ -193,6 +197,7 @@ sources and the same targets:
 | `make play` | Prepara a imagem do jogo e joga / Prepares the game image and plays |
 | `make launcher` | Lançador de ajustes, macOS/POSIX / Settings launcher, macOS/POSIX |
 | `make driver` | Driver KosmicKrisp do renderizador, macOS / Renderer's KosmicKrisp driver, macOS |
+| `make driver-dist` | Empacota o driver para release / Packages the driver as a release asset |
 | `make verify` | Portão de aceitação do macOS / The macOS acceptance gate |
 | `make package` | `dist/SotC-PC.zip` (Windows) |
 | `make clean` | Remove as saídas de build / Removes build outputs |

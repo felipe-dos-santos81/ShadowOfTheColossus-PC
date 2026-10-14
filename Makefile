@@ -12,7 +12,7 @@ GATE      = $(PYTHON) tools/macos_check.py
 OS        = $(shell uname -s)
 seconds  ?= 30
 
-.PHONY: help deps build test driver verify play launcher package clean distclean
+.PHONY: help deps build test driver driver-dist verify play launcher package clean distclean
 
 # macOS-only targets stop with one clear message anywhere else.
 define require-macos
@@ -50,9 +50,13 @@ test: ## Build every target, then run the C and Python test suites
 	$(BUILD) --test
 	$(TESTS)
 
-driver: ## Build the x86-64 KosmicKrisp Vulkan driver (macOS only, 20-40 minutes)
+driver: ## Get the x86-64 KosmicKrisp driver (macOS: prebuilt if BB_KOSMICKRISP_TARBALL/URL, else 20-40 min build)
 	$(require-macos)
 	bash tools/build_kosmickrisp.sh
+
+driver-dist: driver ## Package the driver as a release asset (dist/kosmickrisp-macos-x86_64.tar.gz)
+	$(require-macos)
+	bash tools/package_kosmickrisp.sh
 
 package: ## Build the Windows release zip (dist/SotC-PC.zip); needs a Windows Python
 	@command -v pacman >/dev/null 2>&1 || { echo "Packaging needs MSYS2 CLANG64 on Windows."; exit 1; }
