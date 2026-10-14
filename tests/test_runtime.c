@@ -9,6 +9,7 @@ void runtime_restart(void) { abort(); }
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <stdatomic.h>
 #include <time.h>
 
@@ -159,7 +160,7 @@ static void posix_mutexes(void) {
     m=NULL;
     assert(lock(&m)==0 && lock(&m)==11 && trylock(&m)==16);
     assert(unlock(&m)==0 && destroy(&m)==0);
-    assert(!runtime_resolve("dQHWEsJtoE4",0));
+    assert(!runtime_resolve("dQHWEsJtoE4",1));
 }
 static void wall_time(void) {
     typedef int (ABI *GetTime)(int64_t *,int32_t *);
@@ -173,7 +174,7 @@ static void wall_time(void) {
     assert(t.value[1]>=0 && t.value[1]<1000000);
     assert(t.canary==0xabcdef && z.canary==0x123456);
     assert(get(NULL,NULL)==0 && get(NULL,z.value)==0);
-    assert(!runtime_resolve("n88vx3C5nW8",0));
+    assert(!runtime_resolve("n88vx3C5nW8",1));
 }
 static void direct_memory(void) {
     Allocate alloc=GET(Allocate,"rTXw65xmLIA");
@@ -201,6 +202,14 @@ static void direct_memory(void) {
     x=NULL; assert(map(&x,length,3,0,a,0)==0);
     assert(*(uint64_t *)x==0); /* released allocation does not leak previous data */
     assert(release(a,length)==0); /* release also unmaps owned mapping */
+    /* sotc: fixed virtual range reservation in the PS4 system-managed window (0x7f0000000). */
+    typedef int32_t (ABI *ReserveRange)(void **, uint64_t, int, uint64_t);
+    ReserveRange reserve_range=GET(ReserveRange,"l+cLpWR91dE");
+    if (reserve_range) {
+        void *sys_low=(void *)(uintptr_t)UINT64_C(0x7f0000000);
+        assert(reserve_range(&sys_low,length,0x10,length)==0 && sys_low==(void *)(uintptr_t)UINT64_C(0x7f0000000));
+        assert(unmap(sys_low,length)==0);
+    }
 }
 static void memory_primitives(void) {
     typedef void *(ABI *Set)(void *,int,size_t);
@@ -325,10 +334,35 @@ static void rw_timeouts(void) {
     assert(rw_unlock(&f.lock)==0);
     fixture_destroy(&f);
 }
+#ifdef __APPLE__
+uint32_t runtime_thread_tcb_offset(void);
+static void *tcb_offset_worker(void *out) { *(uint32_t *)out=runtime_thread_tcb_offset(); return NULL; }
+#endif
 int main(int argc,char **argv) {
+    runtime_memory_reserve(); /* macOS: guest ranges, as probe.c does first thing */
+#ifdef __APPLE__
+    /* Handles the guest receives (threads, TLS blocks, mutexes, rwlocks) must fit the 40-bit
+     * fields PS4 code packs pointers into: they come from a low arena, 64-aligned and zeroed. */
+    {
+        void *a=runtime_guest_alloc(100), *big=runtime_guest_alloc(70000);
+        assert(a && big && (uintptr_t)a<(UINT64_C(1)<<40) && (uintptr_t)big<(UINT64_C(1)<<40));
+        assert(((uintptr_t)a&63)==0 && ((uintptr_t)big&63)==0 && ((unsigned char *)a)[99]==0 && ((unsigned char *)big)[69999]==0);
+        memset(a,0xff,100);
+        runtime_guest_free(a);
+        void *again=runtime_guest_alloc(100);
+        assert(again==a && ((unsigned char *)again)[0]==0); /* reused and zeroed again */
+        runtime_guest_free(again); runtime_guest_free(big);
+        void *low=runtime_low_map(16384,PROT_READ|PROT_WRITE);
+        assert(low && (uintptr_t)low>=UINT64_C(0x800000000) && (uintptr_t)low<UINT64_C(0xfc0000000));
+        /* The TLS slot displacement is one pthread key however many threads ask for it first. */
+        pthread_t askers[8]; uint32_t offsets[8];
+        for (int i=0;i<8;++i) assert(pthread_create(&askers[i],NULL,tcb_offset_worker,&offsets[i])==0);
+        for (int i=0;i<8;++i) { pthread_join(askers[i],NULL); assert(offsets[i]==offsets[0] && offsets[i]%8==0 && offsets[i]>0); }
+    }
+#endif
     runtime_start(0); assert(runtime_resolve("bzQExy189ZI",0)==0);
     runtime_start(1);
-    assert(runtime_resolve("bzQExy189ZI",0)==0);
+    assert(runtime_resolve("bzQExy189ZI#q#q",0)!=0);
     assert(runtime_resolve("unknown",0)==0);
     assert(runtime_resolve("8zTFvBIAIN8",1)==0);
     assert(runtime_resolve("f7uOxY9mM1U",0)==0);

@@ -6,6 +6,10 @@
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dirent.h>
+#include <strings.h>
+#include <sys/stat.h>
 #endif
 #define INVALID_ID ((int32_t)0x805a1000)
 #define NOT_LOADED ((int32_t)0x805a1001)
@@ -108,11 +112,9 @@ static int addon_known(const char *content) {
 static void scan_addons(void) {
     if (addons_scanned) return;
     addons_scanned=1;
-#ifndef _WIN32
-    return;
-#else
     const char *root=getenv("SOTC_DLC_DIR");
     if (!root || !*root) return;
+#ifdef _WIN32
     static char base[1024], pattern[1100];
     snprintf(base,sizeof base,"%s\\CUSA08809",root);
     if (GetFileAttributesA(base)==INVALID_FILE_ATTRIBUTES) snprintf(base,sizeof base,"%s",root);
@@ -123,8 +125,6 @@ static void scan_addons(void) {
     do {
         if (entry.cFileName[0]=='.') continue;
         static char path[1400];
-        /* An add-on package not installed: its header says it is additional content (type
-         * 0x1b) and carries the content ID. Entitlement-only DLC needs nothing else. */
         const size_t name_len=strlen(entry.cFileName);
         if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && name_len>4 &&
             !_stricmp(entry.cFileName+name_len-4,".pkg")) {
@@ -168,6 +168,59 @@ static void scan_addons(void) {
         printf("Runtime: DLC %s: entitlement %s\n",entry.cFileName,info->label);
     } while (FindNextFileA(find,&entry));
     FindClose(find);
+#else
+    static char base[1024];
+    struct stat st;
+    snprintf(base,sizeof base,"%s/CUSA08809",root);
+    if (stat(base,&st)!=0 || !S_ISDIR(st.st_mode)) snprintf(base,sizeof base,"%s",root);
+    DIR *dir=opendir(base);
+    if (!dir) { printf("Runtime: DLC folder %s not found\n",base); return; }
+    for (struct dirent *entry; (entry=readdir(dir));) {
+        if (entry->d_name[0]=='.') continue;
+        static char path[1400];
+        snprintf(path,sizeof path,"%s/%s",base,entry->d_name);
+        if (stat(path,&st)!=0) continue;
+        const size_t name_len=strlen(entry->d_name);
+        if (S_ISREG(st.st_mode) && name_len>4 && !strcasecmp(entry->d_name+name_len-4,".pkg")) {
+            FILE *pkg=fopen(path,"rb");
+            static unsigned char header[0x80];
+            const size_t got=pkg ? fread(header,1,sizeof header,pkg) : 0;
+            if (pkg) fclose(pkg);
+            static char content[37];
+            memcpy(content,header+0x40,36); content[36]=0;
+            const uint32_t type=(uint32_t)header[0x74]<<24|header[0x75]<<16|header[0x76]<<8|header[0x77];
+            if (got<sizeof header || memcmp(header,"\x7f" "CNT",4) || type!=0x1b ||
+                !strstr(content,"CUSA08809") || strlen(content)<=20 || addon_count==MAX_ADDONS ||
+                addon_known(content)) continue;
+            AddonInfo *info=&addons[addon_count++];
+            memset(info,0,sizeof *info);
+            snprintf(info->label,sizeof info->label,"%s",content+20);
+            info->status=4;
+            printf("Runtime: DLC %s: entitlement %s\n",entry->d_name,info->label);
+            continue;
+        }
+        if (!S_ISDIR(st.st_mode)) continue;
+        snprintf(path,sizeof path,"%s/%s/sce_sys/param.sfo",base,entry->d_name);
+        FILE *f=fopen(path,"rb");
+        if (!f) continue;
+        static unsigned char data[65536];
+        const size_t size=fread(data,1,sizeof data,f);
+        fclose(f);
+        const char *category=sfo_string(data,size,"CATEGORY");
+        const char *content=sfo_string(data,size,"CONTENT_ID");
+        if (!category || strncmp(category,"ac",2) || !content || strlen(content)<=20) {
+            printf("Runtime: DLC %s skipped (not add-on content)\n",entry->d_name);
+            continue;
+        }
+        if (addon_count==MAX_ADDONS) break;
+        if (addon_known(content)) continue;
+        AddonInfo *info=&addons[addon_count++];
+        memset(info,0,sizeof *info);
+        snprintf(info->label,sizeof info->label,"%s",content+20);
+        info->status=4;
+        printf("Runtime: DLC %s: entitlement %s\n",entry->d_name,info->label);
+    }
+    closedir(dir);
 #endif
 }
 static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint32_t *hits) {

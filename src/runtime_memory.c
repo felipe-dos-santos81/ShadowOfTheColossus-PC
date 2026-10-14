@@ -38,7 +38,18 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
+/* Host-owned memory the guest can see (image, stacks, trampolines) lives in [LOW_MIN, LOW_MAX):
+ * PS4 code packs pointers into 40-bit fields. */
+#define LOW_MIN UINT64_C(0x0800000000)
+#ifdef __APPLE__
+/* 64 GiB - 448 GiB is a kernel guard region in every macOS process (shadPS4 calls it
+ * GPU-reserved; MAP_FIXED there fails with EACCES), and the commpage starts at 63 GiB. */
+#define USER_MIN UINT64_C(0x7000000000)
+#define LOW_MAX UINT64_C(0xfc0000000)
+#else
 #define USER_MIN UINT64_C(0x1000000000)
+#define LOW_MAX USER_MIN
+#endif
 #define USER_MAX UINT64_C(0xfc00000000)
 #define SYSTEM_LOW_MIN UINT64_C(0x0700000000)
 #define SYSTEM_LOW_MAX UINT64_C(0x0800000000)
@@ -250,6 +261,50 @@ static int pool(void) {
     return backing_base ? 0 : -1;
 }
 #else
+#ifdef __APPLE__
+/* Direct memory occupies [0,POOL_SIZE) of a POSIX shared-memory object, flexible memory
+ * [POOL_SIZE,+FLEX_SPAN); views alias it like memfd views (shadPS4 does the same on macOS). */
+static int pool(void) {
+    if (pool_fd>=0) return 0;
+    char name[64];
+    snprintf(name,sizeof(name),"/bb-guest-%d",(int)getpid());
+    shm_unlink(name); /* a crashed run with this pid */
+    pool_fd=shm_open(name,O_RDWR|O_CREAT|O_EXCL,0600);
+    if (pool_fd<0) return -1;
+    shm_unlink(name);
+    if (ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
+    void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED,pool_fd,0);
+    if (view==MAP_FAILED) return -1;
+    backing_base=view;
+    return 0;
+}
+/* Released pages read as zero when reused; shm has no hole punching, the pages stay resident
+ * until the process ends (the Windows section does the same). */
+static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
+/* All three guest ranges are reserved before anything else is placed there (probe.c main):
+ * macOS hands out anonymous memory from low addresses up, so the Vulkan driver or SDL could
+ * land in them. host_map and runtime_low_map replace parts of the reservation with MAP_FIXED. */
+static void reserve(uintptr_t start, uintptr_t end) {
+    void *p=mmap((void *)start,end-start,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_NORESERVE,-1,0);
+    if (p==MAP_FAILED) {
+        fprintf(stderr,"STOP: cannot reserve the guest range %p-%p (%s); another library is mapped there (vmmap %d)\n",
+                (void *)start,(void *)end,strerror(errno),(int)getpid());
+        exit(21);
+    }
+}
+void runtime_memory_reserve(void) {
+    static int done;
+    if (done) return;
+    done=1;
+    reserve(SYSTEM_LOW_MIN,SYSTEM_LOW_MAX);
+    reserve(LOW_MIN,LOW_MAX);
+    reserve(USER_MIN,USER_MAX);
+}
+/* Unmapped ranges go back to the reservation so no host mapping can take them. */
+static int host_unmap(uintptr_t address, uint64_t size) {
+    return mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_NORESERVE,-1,0)==MAP_FAILED ? -1 : 0;
+}
+#else
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (pool_fd>=0) return 0;
@@ -261,17 +316,18 @@ static int pool(void) {
     return 0;
 }
 void runtime_memory_reserve(void) {}
+static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
+static void host_discard(uint64_t phys, uint64_t size) {
+    fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
+}
+#endif
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
     return mapped==MAP_FAILED ? -1 : 0;
 }
-static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
-static void host_discard(uint64_t phys, uint64_t size) {
-    fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
-}
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
     GpuRange hook = kind==HOOK_MAP ? hook_map : kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
@@ -701,24 +757,31 @@ uintptr_t runtime_memory_resolve(const char *name) {
     if (!strcmp(name, "cQke9UuBQOk")) return (uintptr_t)direct_unmap;
     return RUNTIME_LOOKUP(exports,name);
 }
-/* Host-owned memory the guest can see (image, stacks, trampolines) lives in
- * [LOW_MIN, USER_MIN): PS4 code packs pointers into 40-bit fields. */
-#define LOW_MIN UINT64_C(0x0800000000)
 static uintptr_t low_next=LOW_MIN;
 void *runtime_low_map(size_t size, int prot) {
     size=align_up(size,PAGE);
     write_lock();
 #ifdef _WIN32
     void *p=NULL;
-    while (!p && low_next+size<=USER_MIN) {
+    while (!p && low_next+size<=LOW_MAX) {
         p=VirtualAlloc((void *)low_next,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
         low_next+=size+UINT64_C(65536); /* unmapped gap catches overruns; allocation granularity */
     }
     write_unlock();
     return p;
+#elif defined(__APPLE__)
+    /* Inside the PROT_NONE reservation (runtime_memory_reserve): plain MAP_FIXED; the gap stays
+     * PROT_NONE and catches overruns. */
+    void *p=NULL;
+    if (low_next+size<=LOW_MAX) {
+        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
+        if (p==MAP_FAILED) p=NULL; else low_next+=size+PAGE;
+    }
+    write_unlock();
+    return p;
 #else
     void *p=MAP_FAILED;
-    while (low_next+size<=USER_MIN) {
+    while (low_next+size<=LOW_MAX) {
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
@@ -727,6 +790,47 @@ void *runtime_low_map(size_t size, int prot) {
     return p==MAP_FAILED ? NULL : p;
 #endif
 }
+#ifdef __APPLE__
+/* ---- guest-visible host objects (thread handles, TCBs, mutexes, rwlocks) ----
+ * macOS malloc lives at 0x6000_0000_0000 and above, outside the 40 bits PS4 code packs pointers
+ * into. A free-list allocator over low-mapped chunks: 64-byte size classes up to 1 MiB, every
+ * block zeroed on allocation, memory never returned to the system (as the Linux brk heap). */
+#define ARENA_CHUNK (UINT64_C(64)<<20)
+#define ARENA_GRAIN 64
+#define ARENA_CLASSES ((1<<20)/ARENA_GRAIN)
+typedef struct FreeBlock { struct FreeBlock *next; } FreeBlock;
+static pthread_mutex_t arena_lock=PTHREAD_MUTEX_INITIALIZER;
+static unsigned char *arena_next, *arena_end;
+static FreeBlock *arena_free[ARENA_CLASSES+1];
+void *runtime_guest_alloc(size_t size) {
+    size_t rounded=align_up(size ? size : 1,ARENA_GRAIN), class=rounded/ARENA_GRAIN;
+    unsigned char *block=NULL;
+    pthread_mutex_lock(&arena_lock);
+    if (class<=ARENA_CLASSES && arena_free[class]) {
+        block=(unsigned char *)arena_free[class]; arena_free[class]=arena_free[class]->next;
+    } else {
+        size_t need=ARENA_GRAIN+rounded; /* the header keeps the class size for free */
+        if (!arena_next || (size_t)(arena_end-arena_next)<need) {
+            size_t chunk=need>ARENA_CHUNK ? align_up(need,PAGE) : ARENA_CHUNK;
+            unsigned char *fresh=runtime_low_map(chunk,PROT_READ|PROT_WRITE);
+            if (!fresh) { pthread_mutex_unlock(&arena_lock); return NULL; }
+            arena_next=fresh; arena_end=fresh+chunk;
+        }
+        *(size_t *)arena_next=rounded; block=arena_next+ARENA_GRAIN; arena_next+=need;
+    }
+    pthread_mutex_unlock(&arena_lock);
+    memset(block,0,rounded);
+    return block;
+}
+void runtime_guest_free(void *p) {
+    if (!p) return;
+    size_t rounded=*(size_t *)((unsigned char *)p-ARENA_GRAIN), class=rounded/ARENA_GRAIN;
+    if (class>ARENA_CLASSES) return; /* oversize blocks are kept; none expected */
+    pthread_mutex_lock(&arena_lock);
+    ((FreeBlock *)p)->next=arena_free[class]; arena_free[class]=(FreeBlock *)p;
+    pthread_mutex_unlock(&arena_lock);
+}
+#endif
 /* ---- GPU library interface (gpu/shim/bbgpu.cpp) ---- */
 /* Optimizations switched off at run time (diagnostics): the number in the file named by
  * BB_TOGGLE_FILE, re-read every 250 ms. Bits: 1 region cache, 2 fetch shader cache,
