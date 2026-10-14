@@ -34,6 +34,76 @@ MINGW*|MSYS*)
     echo "Built $PWD/out/bb-probe.exe"
     exit 0
     ;;
+Darwin*)
+    # macOS (Apple Silicon): an x86-64 build that runs under Rosetta 2.
+    # Dependencies come from vcpkg (x64-osx, static); the Vulkan loader (vcpkg) and MoltenVK
+    # are copied next to the executables. Static GPU library and a CMake-linked loader like Windows.
+    for tool in cmake ninja pkg-config glslang nasm python3 git lipo; do
+        command -v "$tool" >/dev/null || { echo "Need $tool (brew install cmake ninja pkgconf glslang nasm python; Xcode Command Line Tools)." >&2; exit 1; }
+    done
+    moltenvk=${BB_MOLTENVK:-}
+    if [[ -z $moltenvk ]]; then
+        for candidate in out/moltenvk/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib \
+                         ../../theirs/bloodborne_pc/out/moltenvk/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib \
+                         "${VULKAN_SDK:-/nonexistent}/lib/libMoltenVK.dylib" "$HOME"/VulkanSDK/*/macOS/lib/libMoltenVK.dylib \
+                         /usr/local/lib/libMoltenVK.dylib; do
+            if [[ -f $candidate ]]; then moltenvk=$candidate; break; fi
+        done
+    fi
+    if [[ ! -f ${moltenvk:-} ]]; then
+        echo 'MoltenVK not found: unpack a MoltenVK-macos release (github.com/KhronosGroup/MoltenVK/releases) into out/moltenvk, install the LunarG Vulkan SDK and set VULKAN_SDK, or set BB_MOLTENVK=/path/to/libMoltenVK.dylib.' >&2; exit 1
+    fi
+    if ! lipo -archs "$moltenvk" | grep -q x86_64; then
+        echo "$moltenvk has no x86_64 slice (Homebrew's molten-vk is arm64 only); use a MoltenVK release or the LunarG SDK." >&2; exit 1
+    fi
+    vcpkg_root=${VCPKG_ROOT:-}
+    if [[ -z $vcpkg_root ]]; then
+        if [[ -x out/vcpkg/vcpkg ]]; then vcpkg_root=$PWD/out/vcpkg
+        elif [[ -x ../../theirs/bloodborne_pc/out/vcpkg/vcpkg ]]; then vcpkg_root=$(cd ../../theirs/bloodborne_pc/out/vcpkg && pwd)
+        else vcpkg_root=$PWD/out/vcpkg; fi
+    fi
+    if [[ ! -x $vcpkg_root/vcpkg ]]; then
+        [[ -d $vcpkg_root ]] || git clone --depth 1 https://github.com/microsoft/vcpkg.git "$vcpkg_root"
+        "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics
+    fi
+    if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
+          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
+        git submodule update --init --recursive
+    fi
+    for patch in gpu/patches/fsr-vulkan/*.patch; do
+        if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+            git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
+        fi
+    done
+    export PKG_CONFIG_ALL_STATIC=1
+    env -u VULKAN_SDK cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
+        -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" \
+        -DVCPKG_TARGET_TRIPLET=x64-osx -DVCPKG_MANIFEST_DIR="$PWD/packaging/macos" \
+        -DVCPKG_INSTALLED_DIR="$PWD/out/vcpkg_installed"
+    echo "GPU library and loader: LTO ${BB_LTO:-OFF} (x86-64, Rosetta 2)"
+    tests=(compat-mac-test pad-test file-mods-test content-test runtime-test sema-test)
+    targets=(bb-probe bb-gpu-capabilities)
+    if [[ ${1:-} == --test ]]; then targets+=("${tests[@]}"); fi
+    if ! ninja -C out/gpu "${targets[@]}" > out/gpu-build.log 2>&1; then
+        grep -v '^\[' out/gpu-build.log | tail -40 >&2
+        echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
+    fi
+    cp out/gpu/bb-probe out/gpu/bb-gpu-capabilities out/
+    cp -a out/vcpkg_installed/x64-osx/lib/libvulkan.*dylib out/
+    cp -L "$moltenvk" out/libMoltenVK.dylib
+    if [[ -f $(dirname "$moltenvk")/MoltenVK_icd.json ]]; then
+        cp "$(dirname "$moltenvk")/MoltenVK_icd.json" out/
+    else
+        printf '{"file_format_version":"1.0.0","ICD":{"library_path":"./libMoltenVK.dylib","api_version":"1.3.0","is_portability_driver":true}}\n' > out/MoltenVK_icd.json
+    fi
+    echo "Built $PWD/out/bb-probe"
+    if [[ ${1:-} == --test ]]; then
+        export DYLD_LIBRARY_PATH=$PWD/out VK_DRIVER_FILES=$PWD/out/MoltenVK_icd.json
+        for test in "${tests[@]}"; do "out/gpu/$test" || { echo "$test failed" >&2; exit 1; }; done
+    fi
+    exit 0
+    ;;
 esac
 if [[ -z ${CC:-} ]]; then
     CC=$(command -v cc || command -v gcc || true)

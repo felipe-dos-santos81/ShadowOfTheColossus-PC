@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "sotc-macos",
+  "version-string": "0.57",
+  "description": "x86-64 dependencies of the Shadow of the Colossus port on macOS (built under Rosetta 2)",
+  "dependencies": [
+    "sdl3",
+    "vulkan-headers",
+    "vulkan-loader",
+    "vulkan-memory-allocator",
+    "fmt",
+    "boost-asio",
+    "boost-container",
+    "boost-container-hash",
+    "boost-icl",
+    "boost-intrusive",
+    "boost-pool",
+    "boost-preprocessor",
+    "robin-map",
+    "xxhash",
+    { "name": "ffmpeg", "default-features": false, "features": ["avcodec", "avformat", "swresample", "swscale"] },
+    "zydis"
+  ]
+}
