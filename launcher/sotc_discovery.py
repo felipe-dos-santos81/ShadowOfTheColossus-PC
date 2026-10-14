@@ -188,7 +188,7 @@ def local_drives():
         mask = ctypes.windll.kernel32.GetLogicalDrives()
         get_type = ctypes.windll.kernel32.GetDriveTypeW
     except (AttributeError, OSError):
-        return [Path.home().anchor]
+        return []
     for i, letter in enumerate(string.ascii_uppercase):
         if mask & (1 << i):
             root = f'{letter}:\\'
@@ -205,8 +205,8 @@ def scan(seconds=25.0, depth=5, extra_roots=()):
     deadline = time.monotonic() + seconds
     home = Path.home()
     appdata = Path(os.environ.get('APPDATA', home))
-    likely = [*extra_roots, appdata / 'shadPS4', home / 'Desktop', home / 'Downloads', home / 'Documents',
-              home / 'Games', home]
+    likely = [*extra_roots, appdata / 'shadPS4', home / 'Library' / 'Application Support' / 'shadPS4',
+              home / 'Desktop', home / 'Downloads', home / 'Documents', home / 'Games', home]
     roots = [str(p) for p in likely if Path(p).is_dir()] + local_drives()
 
     def visit(path, level):

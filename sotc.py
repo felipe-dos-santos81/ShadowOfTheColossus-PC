@@ -51,15 +51,20 @@ def load_ini():
 
 def no_console():
     """Started without a console (the launcher): console programs must not open their own."""
+    if sys.platform != 'win32':
+        return 0
     import ctypes
     return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
 
 
 def find_probe():
-    for candidate in (PORT / 'bin' / 'bb-probe.exe', PORT / 'out' / 'bb-probe.exe'):
-        if candidate.is_file():
-            return candidate
-    fail('bb-probe.exe not found: build it with build.sh (MSYS2 CLANG64) or use a packaged build.')
+    names = ('bb-probe.exe',) if sys.platform == 'win32' else ('bb-probe', 'bb-probe.exe')
+    for folder in ('bin', 'out'):
+        for name in names:
+            candidate = PORT / folder / name
+            if candidate.is_file():
+                return candidate
+    fail('bb-probe not found: build it with build.sh or use a packaged build.')
 
 
 def run_script(name, *args):
@@ -115,13 +120,50 @@ def merged_source(game, update, out):
     return merged
 
 
+def extract_pkg(pkg, out):
+    """Extracts a CUSA08809 .pkg into out/CUSA08809 using PkgTool.Core if not extracted yet."""
+    target = out / 'CUSA08809'
+    if (target / 'eboot.bin').is_file() and (target / 'sce_sys' / 'param.sfo').is_file():
+        return target
+    tool = None
+    for candidate in (out / 'pkgtool' / 'PkgTool.Core',
+                      PORT.parent.parent / 'theirs' / 'bloodborne_pc' / 'out' / 'pkgtool' / 'PkgTool.Core'):
+        if candidate.is_file():
+            tool = candidate
+            break
+    if not tool:
+        fail(f'{pkg} is a .pkg archive and PkgTool.Core was not found to extract it.')
+    print(f'Extracting {pkg.name} into {target}...')
+    extract_dir = out / 'pkg-extract'
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run([str(tool), 'pkg_extract', '--passcode', '0' * 32, str(pkg), str(extract_dir)], check=True)
+    sce_sys = extract_dir / 'uroot' / 'sce_sys'
+    sce_sys.mkdir(parents=True, exist_ok=True)
+    for entry_id, name in (('11', 'param.sfo'), ('12', 'playgo-chunk.dat'), ('17', 'pic1.png'), ('19', 'icon0.png')):
+        subprocess.run([str(tool), 'pkg_extractentry', str(pkg), entry_id, str(sce_sys / name)], check=False)
+    if target.is_symlink() or target.exists():
+        target.unlink()
+    target.symlink_to(extract_dir / 'uroot')
+    return target.resolve()
+
+
 def main():
     load_ini()
     env = os.environ
     os.chdir(PORT)
     out = PORT / 'out'
     out.mkdir(exist_ok=True)
-    game = Path(env.get('SOTC_GAME_DIR', PORT.parent / 'CUSA08809')).resolve()
+    default_game = PORT.parent / 'CUSA08809'
+    if not (default_game / 'eboot.bin').is_file():
+        if (out / 'CUSA08809' / 'eboot.bin').is_file():
+            default_game = out / 'CUSA08809'
+        else:
+            pkgs = sorted((Path.home() / 'Downloads').glob('*CUSA08809*.pkg'))
+            if pkgs:
+                default_game = pkgs[0]
+    game = Path(env.get('SOTC_GAME_DIR', default_game)).expanduser().resolve()
+    if game.is_file() and game.suffix.lower() == '.pkg':
+        game = extract_pkg(game, out)
     if not (game / 'eboot.bin').is_file():
         fail(f'No eboot.bin in {game}: set SOTC_GAME_DIR (environment or sotc.ini).')
 
@@ -170,11 +212,20 @@ def main():
         env.setdefault('BB_VBLANK_HZ', '120')
 
     probe = find_probe()
-    # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
-    if not (probe.parent / 'SDL3.dll').is_file():
-        clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
-        if clang64.is_dir():
-            env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
+    if sys.platform == 'win32':
+        # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
+        if not (probe.parent / 'SDL3.dll').is_file():
+            clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
+            if clang64.is_dir():
+                env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
+    elif sys.platform == 'darwin':
+        env['DYLD_LIBRARY_PATH'] = f'{probe.parent}{os.pathsep}{env["DYLD_LIBRARY_PATH"]}' if env.get('DYLD_LIBRARY_PATH') else str(probe.parent)
+        if not env.get('VK_DRIVER_FILES'):
+            kosmickrisp = probe.parent / 'kosmickrisp_mesa_icd.json'
+            env['VK_DRIVER_FILES'] = str(kosmickrisp if kosmickrisp.is_file() else probe.parent / 'MoltenVK_icd.json')
+        env.setdefault('MVK_CONFIG_LOG_LEVEL', '2')
+    env.setdefault('BB_FULLSCREEN', '0')
+    env.setdefault('SOTC_MOUSE', '0')
     user = Path(env.get('SOTC_USER_DIR', PORT / 'user')).resolve()
     user.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_GPU_USER_DIR', str(user))

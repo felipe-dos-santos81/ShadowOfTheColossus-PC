@@ -22,9 +22,16 @@ import sys
 import threading
 
 FROZEN = getattr(sys, 'frozen', False)
+WINDOWS = sys.platform == 'win32'
 PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
-CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'sotc-launcher'
+if WINDOWS:
+    _config_base = Path(os.environ.get('APPDATA', Path.home()))
+elif sys.platform == 'darwin':
+    _config_base = Path.home() / 'Library' / 'Application Support'
+else:
+    _config_base = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+CONFIG_DIR = _config_base / 'sotc-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 GAME_ID, GAME_VERSION = 'CUSA08809', '01.01'
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
@@ -55,7 +62,8 @@ def attach_stdio():
 
 def run_role(argv):
     """--run [args]: sotc.py; --script <file> [args]: a preparation script. Returns an exit code."""
-    attach_stdio()
+    if WINDOWS:
+        attach_stdio()
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(line_buffering=True)
@@ -88,22 +96,30 @@ def _(pt, en):
     return pt if LANG == 'pt' else en
 
 
-def windows_language():
-    try:
-        primary = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff
-    except (AttributeError, OSError):
-        primary = 0
-    return 'pt' if primary == 0x16 else 'en'
+def system_language():
+    if WINDOWS:
+        try:
+            primary = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff
+        except (AttributeError, OSError):
+            primary = 0
+        return 'pt' if primary == 0x16 else 'en'
+    import locale
+    code = (locale.getlocale()[0] or os.environ.get('LANG', '')).split('_')[0].split('.')[0].lower()
+    return 'pt' if code == 'pt' else 'en'
+
+
+windows_language = system_language
 
 
 # ---------------------------------------------------------------------------------------------
 # Settings, passed to sotc.py as environment variables.
 
-APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), 'sys_modules': '',
+_DEFAULT_GAME_DIR = PORT_DIR / 'out' / GAME_ID if (PORT_DIR / 'out' / GAME_ID / 'eboot.bin').is_file() else PORT_DIR.parent / GAME_ID
+APP_DEFAULTS = {'ui_language': '', 'game_dir': str(_DEFAULT_GAME_DIR), 'sys_modules': '',
                 'user_dir': '', 'af16': True, 'fps60': False, 'fullscreen': False,
                 'present_mode': 'Mailbox', 'language': '', 'player_name': '', 'show_fps': False,
                 'readbacks': '', 'extra_env': '', 'close_on_play': False, 'gamepad': '',
-                'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
+                'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': False,
                 'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True,
                 'fx_fog': True, 'fx_ssao': True, 'engine_cvars': '', 'perf_culling': True,
                 'perf_record_thread': True, 'perf_dma': True, 'gpu_submit': 'auto', 'library_dirs': [], 'keys': {},
@@ -912,7 +928,8 @@ class Launcher:
         self.check(f, 'close_on_play', _('Fechar o lançador quando o jogo abrir', 'Close the launcher when the game starts'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10, 0))
-        ttk.Button(holder, text=_('Atalho na área de trabalho', 'Desktop shortcut'), command=self.shortcut).pack(side='left')
+        if WINDOWS:
+            ttk.Button(holder, text=_('Atalho na área de trabalho', 'Desktop shortcut'), command=self.shortcut).pack(side='left')
         ttk.Button(holder, text=_('Pasta do port', 'Port folder'), command=lambda: self.open_path(PORT_DIR)).pack(side='left', padx=6)
         ttk.Button(holder, text=_('Limpar cache de shaders', 'Clear shader cache'), command=self.clear_cache).pack(side='left')
         self.section(f, _('Diagnóstico', 'Diagnostics'))
@@ -997,13 +1014,18 @@ class Launcher:
         return '   ·   '.join(parts)
 
     def detect_gpu(self):
-        exe = PORT_DIR / 'bin' / 'bb-gpu-capabilities.exe'
+        suffix = '.exe' if WINDOWS else ''
+        exe = PORT_DIR / 'bin' / f'bb-gpu-capabilities{suffix}'
         if not exe.is_file():
-            exe = PORT_DIR / 'out' / 'bb-gpu-capabilities.exe'
+            exe = PORT_DIR / 'out' / f'bb-gpu-capabilities{suffix}'
         env = dict(os.environ)
-        if not (exe.parent / 'SDL3.dll').is_file():
+        if WINDOWS and not (exe.parent / 'SDL3.dll').is_file():
             clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
+        if sys.platform == 'darwin':
+            env['DYLD_LIBRARY_PATH'] = str(exe.parent)
+            kosmickrisp = exe.parent / 'kosmickrisp_mesa_icd.json'
+            env.setdefault('VK_DRIVER_FILES', str(kosmickrisp if kosmickrisp.is_file() else exe.parent / 'MoltenVK_icd.json'))
         text = _('• Placa de vídeo: não verificada', '• Graphics card: not checked')
         try:
             result = subprocess.run([str(exe), '--live-resolution'], capture_output=True, text=True, timeout=30,
@@ -1396,7 +1418,8 @@ class Launcher:
         try:
             self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app),
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+                                            stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
+                                            start_new_session=not WINDOWS)
         except OSError as error:
             self.append(_('Não foi possível iniciar: {}', 'Could not start: {}').format(error) + '\n')
             self.process = None
@@ -1483,7 +1506,10 @@ class Launcher:
         path = Path(path or PORT_DIR)
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(path))
+        if WINDOWS:
+            os.startfile(str(path))
+        else:
+            subprocess.Popen(['open' if sys.platform == 'darwin' else 'xdg-open', str(path)])
 
     def clear_cache(self):
         if self.process:
@@ -1524,18 +1550,34 @@ class Launcher:
 
 
 class GameJob:
-    """A Windows job holding sotc.py and the bb-probe.exe it starts (Stop ends both)."""
+    """A job/process-group holding sotc.py and the bb-probe it starts (Stop ends both)."""
 
-    def __init__(self, process):
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-        self.handle = kernel32.CreateJobObjectW(None, None)
-        if self.handle:
-            kernel32.AssignProcessToJobObject(ctypes.c_void_p(self.handle), ctypes.c_void_p(int(process._handle)))
+    def __init__(self, process, kill_after=5.0):
+        self.process = process
+        self.handle = None
+        self.kill_after = kill_after
+        if WINDOWS:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+            self.handle = kernel32.CreateJobObjectW(None, None)
+            if self.handle:
+                kernel32.AssignProcessToJobObject(ctypes.c_void_p(self.handle), ctypes.c_void_p(int(process._handle)))
 
     def terminate(self):
-        if self.handle:
-            ctypes.windll.kernel32.TerminateJobObject(ctypes.c_void_p(self.handle), 1)
+        if WINDOWS:
+            if self.handle:
+                ctypes.windll.kernel32.TerminateJobObject(ctypes.c_void_p(self.handle), 1)
+            return
+        import signal
+        group = self.process.pid
+
+        def kill(sig):
+            try:
+                os.killpg(group, sig)
+            except ProcessLookupError:
+                pass
+        kill(signal.SIGTERM)
+        threading.Timer(self.kill_after, kill, args=(signal.SIGKILL,)).start()
 
     def close(self):
         if self.handle:
@@ -1545,7 +1587,8 @@ class GameJob:
 
 def play_without_window(settings):
     """--play: the game with the saved settings (shortcuts, Steam); output to user/last_run.log."""
-    attach_stdio()
+    if WINDOWS:
+        attach_stdio()
     log_dir = user_dir(settings)
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -1555,7 +1598,8 @@ def play_without_window(settings):
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+                                   stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
+                                   start_new_session=not WINDOWS)
         for raw in iter(process.stdout.readline, b''):
             text = raw.decode('utf-8', errors='replace')
             log.write(text)
@@ -1572,13 +1616,14 @@ def main():
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
     settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
-    LANG = settings.get('ui_language') or windows_language()
+    LANG = settings.get('ui_language') or system_language()
     if '--play' in args and (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
         sys.exit(play_without_window(settings))
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        pass
+    if WINDOWS:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
     root = tk.Tk()

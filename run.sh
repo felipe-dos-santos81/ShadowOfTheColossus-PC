@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
+if [[ $(uname -s) == Darwin ]]; then
+    libs=out; [[ -n ${BB_PREBUILT:-} ]] && libs=bin
+    export DYLD_LIBRARY_PATH=$PWD/$libs${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}
+    if [[ -z ${VK_DRIVER_FILES:-} ]]; then
+        if [[ -f $libs/kosmickrisp_mesa_icd.json ]]; then export VK_DRIVER_FILES=$PWD/$libs/kosmickrisp_mesa_icd.json
+        else export VK_DRIVER_FILES=$PWD/$libs/MoltenVK_icd.json; fi
+    fi
+    export MVK_CONFIG_LOG_LEVEL=${MVK_CONFIG_LOG_LEVEL:-2}
+fi
 if [[ ${1:-} == --software ]]; then
     shift
     if [[ -z ${VK_DRIVER_FILES:-} ]]; then
@@ -23,7 +32,7 @@ export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
 if [[ -z ${BB_FSR411_DIR:-} && ! -d fsr4_411 && -d $data/fsr4_411 ]]; then
     export BB_FSR411_DIR=$data/fsr4_411
 fi
-if [[ -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} ]] && ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; } && command -v nix-shell >/dev/null; then
+if [[ $(uname -s) != Darwin && -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} ]] && ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; } && command -v nix-shell >/dev/null; then
     args=''; if (( $# )); then args=$(printf '%q ' "$@"); fi
     exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash run.sh $args"
 fi
