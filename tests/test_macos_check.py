@@ -75,17 +75,30 @@ class RunResult(unittest.TestCase):
 
 
 class WindowMarkerContract(unittest.TestCase):
-    """The window marker is a contract between gpu/shim/window.cpp and macos_check.MARKERS."""
+    """The window marker is a contract between gpu/shim/window.cpp and macos_check.MARKERS.
 
-    def test_the_marker_matches_the_line_window_cpp_prints(self):  # Standing contract, pinned
-        source = (ROOT / 'gpu' / 'shim' / 'window.cpp').read_text()
-        self.assertIn('"Window %dx%d %s: relative mouse %s, grab %s\\n"', source)
+    The format alone is not the contract: the gate fails a run whose line says `grab on`, so what
+    feeds each `%s` is pinned too. Whitespace is flattened, so reformatting is fine while swapping
+    which SDL getter reports which state is not.
+    """
+
+    def setUp(self):
+        self.source = (ROOT / 'gpu' / 'shim' / 'window.cpp').read_text()
+        self.flat = ' '.join(self.source.split())
+
+    def test_the_marker_matches_the_line_window_cpp_prints(self):
+        self.assertIn('"Window %dx%d %s: relative mouse %s, grab %s\\n"', self.source)
         pattern = dict(macos_check.MARKERS)['windowed, unlocked cursor']
         line = 'Window %dx%d %s: relative mouse %s, grab %s' % (1280, 720, 'windowed', 'off', 'off')
         self.assertRegex(line, pattern)
-        # And the states the format is fed: fail a gate that would accept a grabbed cursor.
-        for state in ('windowed', 'fullscreen', 'on', 'off'):
-            self.assertIn(f'"{state}"', source)
+
+    def test_each_state_comes_from_the_getter_that_names_it(self):
+        self.assertIn('std::fprintf(stderr, "Window %dx%d %s: relative mouse %s, grab %s\\n", '
+                      'width_, height_,', self.flat)
+        self.assertIn('(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) ? "fullscreen" '
+                      ': "windowed"', self.flat)
+        self.assertIn('SDL_GetWindowRelativeMouseMode(window) ? "on" : "off"', self.flat)
+        self.assertIn('SDL_GetWindowMouseGrab(window) ? "on" : "off"', self.flat)
 
 
 class ProcessControl(unittest.TestCase):

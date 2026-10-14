@@ -48,8 +48,8 @@
 deltas the review settled, so a reader does not follow a signature that no longer exists:
 
 - `run()` returns a `Run(problems, log)` NamedTuple, not `(ok, log)`, and has no `env` parameter.
-  `check_log()` takes `returncode=None`: a run the gate had to end is acceptable, one that ended
-  itself before the deadline is not.
+  `check_log()` takes `returncode=None`: a run the gate had to end is acceptable, and so is one
+  that exited cleanly before the deadline; a non-zero status before the deadline is not.
 - `extract_pkg(pkg, out)` has no `tool` parameter: tests place a stub at `out/pkgtool/PkgTool.Core`,
   which is where the real search looks, so the seam is the filesystem rather than an argument.
 - The gate's `assertion` pattern is case-insensitive (`[Aa]ssertion [Ff]ailed`) because the port

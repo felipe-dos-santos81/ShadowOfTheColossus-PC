@@ -1,38 +1,45 @@
 #!/usr/bin/env bash
-# macOS: install a prepared KosmicKrisp driver into a destination directory (out/ by default).
+# macOS: install a prepared KosmicKrisp driver into a destination directory.
 #
 #     tools/install_kosmickrisp.sh <source-dir | tarball> [dest]
 #
 # The source is either a directory holding the three files below or a .tar.gz of one (built by
 # tools/package_kosmickrisp.sh). This script owns the layout contract -- the three names, an
-# x86-64 driver slice -- so that build_kosmickrisp.sh, `make driver-dist` and the test all agree.
-# Used by tools/build_kosmickrisp.sh to install a prebuilt driver (BB_KOSMICKRISP_TARBALL /
+# x86-64 driver slice -- so build_kosmickrisp.sh, `make driver-dist` and the test all agree on it
+# instead of each repeating the file list and the slice check. Used by
+# tools/build_kosmickrisp.sh to install a prebuilt driver (BB_KOSMICKRISP_TARBALL /
 # BB_KOSMICKRISP_URL) or a sibling checkout's copy, skipping the 20-40 minute Mesa build.
 set -euo pipefail
 source=${1:?usage: install_kosmickrisp.sh <source-dir | tarball> [dest]}
-dest=${2:-out}
+root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+# An explicit dest is relative to the caller, like the source is; the default is the port's own
+# out/, so a bare "install this" cannot land a driver in whatever directory happens to be current.
+dest=${2:-$root/out}
 files=(libvulkan_kosmickrisp.dylib libz.1.dylib kosmickrisp_mesa_icd.json)
 
 command -v lipo >/dev/null || { echo 'Need lipo to check the driver slice (Xcode Command Line Tools: xcode-select --install).' >&2; exit 1; }
 
+# The names `dir` lacks, space-separated; empty when it holds all three. This is the one place
+# that decides "is this a KosmicKrisp driver", for the tarball's candidates and the final answer.
+missing_names() {
+    local dir=$1 name found=''
+    for name in "${files[@]}"; do
+        [[ -f $dir/$name ]] || found="${found:+$found }$name"
+    done
+    printf '%s' "$found"
+}
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-
-# A source that holds the three files, directly or as the single directory a tarball usually has.
-is_driver_dir() {
-    local dir=$1 name
-    for name in "${files[@]}"; do
-        [[ -f $dir/$name ]] || return 1
-    done
-}
 
 if [[ -d $source ]]; then
     from=$source
 elif [[ -f $source ]]; then
     tar -xzf "$source" -C "$work"
     from=''
+    # A tarball may hold the files directly or in one top-level directory; both are accepted.
     for candidate in "$work" "$work"/*/; do
-        if is_driver_dir "$candidate"; then from=$candidate; break; fi
+        if [[ -z $(missing_names "$candidate") ]]; then from=$candidate; break; fi
     done
     [[ -n $from ]] || { echo "$source does not hold ${files[*]} (directly or one directory down)." >&2; exit 1; }
 else
@@ -40,17 +47,14 @@ else
     exit 1
 fi
 
-missing=''
-for name in "${files[@]}"; do
-    [[ -f $from/$name ]] || missing="${missing:+$missing }$name"
-done
+missing=$(missing_names "$from")
 if [[ -n $missing ]]; then
-    echo "$source is not a KosmicKrisp driver: missing $missing (expected ${files[*]})." >&2
+    echo "$source is not a KosmicKrisp driver (${files[*]}): missing $missing." >&2
     exit 1
 fi
 
 archs=$(lipo -archs "$from/libvulkan_kosmickrisp.dylib" 2>&1) || {
-    echo "$source/libvulkan_kosmickrisp.dylib is not a Mach-O library: $archs" >&2
+    echo "the driver in $source is not a Mach-O library: $archs" >&2
     exit 1
 }
 if ! grep -q x86_64 <<<"$archs"; then

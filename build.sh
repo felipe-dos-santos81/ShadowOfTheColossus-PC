@@ -182,10 +182,10 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
-    # The windowed-mode size clamp is header-only; build it where a C++ compiler is present.
+    # The windowed-mode size clamp is header-only. The GPU library is C++ too, so a box that got
+    # this far has a C++ compiler; a missing one is a broken environment, not a reason to skip.
     CXX=${CXX:-$(command -v c++ || command -v g++ || true)}
-    if [[ -n $CXX ]]; then
-        "$CXX" -std=c++17 -O2 -g -Wall -Wextra -Werror -Igpu/shim tests/test_window_scale.cpp -o out/window-scale-test
-        out/window-scale-test
-    fi
+    [[ -n $CXX ]] || { echo 'Need a C++ compiler (set CXX) for the window-size test.' >&2; exit 1; }
+    "$CXX" -std=c++17 -O2 -g -Wall -Wextra -Werror -Igpu/shim tests/test_window_scale.cpp -o out/window-scale-test
+    out/window-scale-test
 fi
