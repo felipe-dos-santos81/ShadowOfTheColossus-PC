@@ -2,6 +2,7 @@
 #define BB_RUNTIME_H
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #ifdef _WIN32
 #include "compat_win.h"
 /* No signals on Windows: the exception handler resumes the thread in bb_longjmp
@@ -9,6 +10,7 @@
 typedef bb_jmp_buf sigjmp_buf;
 #define sigsetjmp(buffer, save) bb_setjmp(buffer)
 #else
+#include "compat_mac.h"
 #include <setjmp.h>
 #endif
 /* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
@@ -70,8 +72,21 @@ void runtime_thread_keys_cleanup(void);
 /* Guest-visible errno values are FreeBSD's. */
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
-/* Windows: reserves the PS4 user address range as a placeholder (no-op elsewhere). */
+/* Windows: reserves the PS4 user address range as a placeholder; macOS: guest ranges
+ * PROT_NONE (no-op on Linux). */
 void runtime_memory_reserve(void);
+/* Host objects the guest holds pointers to (thread handles, TCBs, mutexes, rwlocks) stay below
+ * 1 TiB: PS4 code packs pointers into 40-bit fields. Linux keeps them in the low brk heap
+ * (probe.c mallopt), Windows in low heaps (no high-entropy ASLR), macOS in a low arena. */
+#ifdef __APPLE__
+void *runtime_guest_alloc(size_t size); /* zeroed, 64-byte aligned, below 1 TiB */
+void runtime_guest_free(void *block);
+#else
+#define runtime_guest_alloc(size) calloc(1,(size))
+#define runtime_guest_free(block) free(block)
+#endif
+uintptr_t runtime_sotc_heap(void);
+void runtime_sotc_set_heap(uintptr_t heap);
 uintptr_t runtime_ajm_resolve(const char *name);
 void runtime_ajm_report(void);
 uintptr_t runtime_audio_resolve(const char *name);

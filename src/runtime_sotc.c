@@ -13,7 +13,9 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#ifndef __APPLE__
 #include <sys/syscall.h>
+#endif
 #endif
 
 #define KERNEL_ERROR(e) ((int32_t)(UINT32_C(0x80020000) + (e)))
@@ -63,6 +65,8 @@ static ABI int32_t kernel_sleep(uint32_t seconds) {
 static ABI int32_t get_thread_id(void) {
 #ifdef _WIN32
     return (int32_t)GetCurrentThreadId();
+#elif defined(__APPLE__)
+    uint64_t tid=0; pthread_threadid_np(NULL,&tid); return (int32_t)tid;
 #else
     return (int32_t)syscall(SYS_gettid);
 #endif
@@ -189,7 +193,7 @@ static ABI int32_t net_unavailable(void) { return (int32_t)0x80410101; }
  * paces the audio thread. Real sound will come from the user's own firmware modules. --- */
 typedef struct { uint32_t magic, kind; uint64_t rack_id; } AudioHandle;
 static AudioHandle *audio_handle(uint32_t kind, uint64_t rack_id) {
-    AudioHandle *h=calloc(1,sizeof(*h));
+    AudioHandle *h=runtime_guest_alloc(sizeof(*h));
     if (h) { h->magic=0x4e475332; h->kind=kind; h->rack_id=rack_id; }
     return h;
 }
@@ -316,7 +320,7 @@ static int evf_valid_mode(int mode) {
 static ABI int32_t evf_create(EventFlag **out, const char *name, uint32_t attr, uint64_t pattern, const void *option) {
     if (!out || !name || option || attr>0x22) return KERNEL_ERROR(E_INVAL);
     if (strlen(name)>=32) return KERNEL_ERROR(E_NAMETOOLONG);
-    EventFlag *f=calloc(1,sizeof(*f));
+    EventFlag *f=runtime_guest_alloc(sizeof(*f));
     if (!f) return KERNEL_ERROR(12);
     pthread_mutex_init(&f->lock,NULL); pthread_cond_init(&f->gone,NULL);
     f->bits=pattern; f->multi=(attr&0xf0)==0x20;
@@ -499,6 +503,10 @@ static const struct { const char *nid; void *function; } by_nid[]={
     {"HZ9Q2c+4BU4",ok_ignored}, {"SweJO7t3pkk",ulobjmgr_check},
     {"pztV4AF18iI",guest_sincosf}, /* sincosf (libSceLibcInternal, libSceNgs2) */
 };
+static volatile uintptr_t sotc_heap_chosen;
+uintptr_t runtime_sotc_heap(void) { return sotc_heap_chosen; }
+void runtime_sotc_set_heap(uintptr_t heap) { sotc_heap_chosen = heap; }
+
 uintptr_t runtime_sotc_resolve(const char *name) {
     for (size_t i=0;i<sizeof(by_nid)/sizeof(*by_nid);++i)
         if (!strcmp(name,by_nid[i].nid)) return (uintptr_t)by_nid[i].function;

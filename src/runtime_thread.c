@@ -17,7 +17,11 @@
 #include <unistd.h>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <signal.h>
+#include <sys/mman.h> /* PROT_* for the guest stacks; the TLS slot is a pthread key */
 #else
+#include <signal.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
 #include <asm/prctl.h>
@@ -84,6 +88,23 @@ static void set_gs(void *base) {
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
+#elif defined(__APPLE__)
+/* One key for the process, whichever thread asks first (main does, in probe.c; tests and HLE
+ * host threads may race). */
+static pthread_key_t tls_key;
+static pthread_once_t tls_key_once=PTHREAD_ONCE_INIT;
+static void create_tls_key(void) {
+    if (pthread_key_create(&tls_key,NULL)) { fputs("STOP: pthread_key_create failed\n",stderr); exit(21); }
+}
+uint32_t runtime_thread_tcb_offset(void) {
+    pthread_once(&tls_key_once,create_tls_key);
+    return 8u*(uint32_t)tls_key;
+}
+static void set_gs(void *base) {
+    runtime_thread_tcb_offset();
+    if (pthread_setspecific(tls_key,base)) { fputs("STOP: pthread_setspecific failed\n",stderr); exit(21); }
+}
+#define tls_block_alloc(size) runtime_guest_alloc(size) /* below 1 TiB: the guest sees the TCB */
 #else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
@@ -106,9 +127,20 @@ static void attach(GuestThread *t) {
     t->tls_block=block; t->tcb=tcb;
     set_gs(tcb);
     current=t;
+#ifndef _WIN32
+    /* sotc: Shadow of the Colossus runs jobs on 16-64 KiB fiber stacks packed back to back.
+     * Delivering GPU page-tracking signals on an alternate stack keeps the fiber stack and its
+     * 128-byte System V red zone untouched. */
+    enum { ALT_STACK_BYTES = 512 * 1024 };
+    void *alt=mmap(NULL,ALT_STACK_BYTES,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if (alt!=MAP_FAILED) {
+        stack_t ss={.ss_sp=alt,.ss_size=ALT_STACK_BYTES,.ss_flags=0};
+        sigaltstack(&ss,NULL);
+    }
+#endif
 }
 static GuestThread *new_thread(void) {
-    GuestThread *t=calloc(1,sizeof(*t));
+    GuestThread *t=runtime_guest_alloc(sizeof(*t));
     if (!t) return NULL;
     t->attr=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.stack=DEFAULT_STACK,.affinity=0x7f};
     return t;
@@ -159,7 +191,7 @@ int32_t *runtime_errno(void) { return &guest_errno; }
 
 static ABI int32_t attr_init(ThreadAttr **out) {
     if (!out) return ERR(22);
-    ThreadAttr *a=calloc(1,sizeof(*a));
+    ThreadAttr *a=runtime_guest_alloc(sizeof(*a));
     if (!a) return ERR(12);
     *a=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.inherit=4,.stack=DEFAULT_STACK,.guard=4096,.affinity=0x7f};
     pthread_mutex_lock(&lock); a->next=attributes; attributes=a; pthread_mutex_unlock(&lock);
@@ -173,7 +205,7 @@ static ABI int32_t attr_destroy(ThreadAttr **slot) {
     while (*link!=a) link=&(*link)->next;
     *link=a->next; a->magic=0;
     pthread_mutex_unlock(&lock);
-    free(a); *slot=NULL; return 0;
+    runtime_guest_free(a); *slot=NULL; return 0;
 }
 static ABI int32_t attr_get(void *thread,ThreadAttr **out) {
     ThreadAttr *a=find_attr(out);
