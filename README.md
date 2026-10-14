@@ -64,6 +64,11 @@ com driver recente). Não precisa instalar Python.
 Os modos de patch (60 FPS, filtro 16x) só valem para a versão EU 1.01; nas outras o jogo roda
 normalmente, a 30 FPS.
 
+Os dois `.sprx` são *firmware da Sony*: o port nunca os distribui. `SOTC_SYS_MODULES` aponta para
+a pasta que os contém (no macOS, `python3 sotc.py`; no Windows, o lançador copia do shadPS4). Sem
+os dois o port roda mudo, e no macOS `python3 tools/macos_check.py` valida a execução do mesmo
+jeito com ou sem eles — a ausência aparece só como a linha `no sound` no log.
+
 ### O lançador
 
 - **Jogar:** confere a versão do jogo, o som, os saves e a placa de vídeo antes de abrir;
@@ -152,6 +157,12 @@ driver). No Python install needed.
 | decrypted `libSceNgs2.sprx`, `libSceUlt.sprx` | your PS4 (`/system/common/lib/`, GoldHEN FTP), or shadPS4's `user/sys_modules` | sound (silent without them) |
 
 The patch modes (60 FPS, 16x filtering) only apply to EU 1.01; other versions run at 30 FPS.
+
+Both `.sprx` files are *Sony firmware*: the port never distributes them. `SOTC_SYS_MODULES`
+points at the folder holding them (on macOS, `python3 sotc.py`; on Windows the launcher copies
+them from shadPS4). Without both the port is silent, and on macOS `python3 tools/macos_check.py`
+validates the run the same way with or without them — their absence shows up only as the
+`no sound` line in the log.
 
 ### Launcher features
 

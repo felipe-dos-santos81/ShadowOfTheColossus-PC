@@ -147,6 +147,22 @@ def extract_pkg(pkg, out):
     return target.resolve()
 
 
+def select_sys_modules(folder):
+    """The firmware modules to link, and the warnings to print when they are not all there.
+
+    The port renders silence without the user's own decrypted libSceUlt.sprx and
+    libSceNgs2.sprx. A folder missing one of them is treated as absent (still silent) so the
+    game keeps running instead of failing on half a sound stack.
+    """
+    if not folder:
+        return [], ['SOTC_SYS_MODULES not set: no sound (see sotc.py)']
+    modules = [Path(folder) / name for name in SYS_MODULES]
+    missing = [m.name for m in modules if not m.is_file()]
+    if missing:
+        return [], [f'SOTC_SYS_MODULES: {", ".join(missing)} not found in {folder}; no sound']
+    return modules, []
+
+
 def main():
     load_ini()
     env = os.environ
@@ -167,16 +183,9 @@ def main():
     if not (game / 'eboot.bin').is_file():
         fail(f'No eboot.bin in {game}: set SOTC_GAME_DIR (environment or sotc.ini).')
 
-    modules = []
-    sys_modules = env.get('SOTC_SYS_MODULES')
-    if sys_modules:
-        modules = [Path(sys_modules) / name for name in SYS_MODULES]
-        missing = [m.name for m in modules if not m.is_file()]
-        if missing:
-            print(f'SOTC_SYS_MODULES: {", ".join(missing)} not found in {sys_modules}; no sound', file=sys.stderr)
-            modules = []
-    else:
-        print('SOTC_SYS_MODULES not set: no sound (see sotc.py)', file=sys.stderr)
+    modules, module_warnings = select_sys_modules(env.get('SOTC_SYS_MODULES'))
+    for warning in module_warnings:
+        print(warning, file=sys.stderr)
 
     # A complete update (shadPS4's <game>-UPDATE): the image comes from its eboot, and its files
     # take the place of the base game's while the game runs (src/runtime_file.c).
