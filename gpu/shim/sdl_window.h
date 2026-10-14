@@ -34,6 +34,9 @@ public:
     void BeginTextInput(const std::string& initial, const std::string& prompt);
     /// 0 while typing, 1 confirmed (Enter), 2 cancelled (Escape); text is UTF-8.
     int PollTextInput(std::string& text);
+    /// macOS: tells the window's CAMetalLayer whether the frames it shows are HDR (PQ) or SDR.
+    /// Nothing to do where the port does not own the layer.
+    void SetHdrOutput(bool hdr);
 
 private:
     std::atomic<s32> width, height;

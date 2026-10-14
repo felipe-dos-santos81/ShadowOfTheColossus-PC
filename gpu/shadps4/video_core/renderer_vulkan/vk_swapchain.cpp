@@ -18,7 +18,7 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
     .colorSpace = vk::ColorSpaceKHR::eHdr10St2084EXT,
 };
 
-Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
+Swapchain::Swapchain(const Instance& instance_, Frontend::WindowSDL& window_)
     : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
     FindPresentFormat();
     FindPresentMode();
@@ -97,6 +97,9 @@ void Swapchain::SetHDR(bool hdr) {
     }
 
     needs_hdr = hdr;
+    // The window's output mode follows the swapchain: an EDR layer expects PQ values, so an SDR
+    // frame on it (or the reverse) would be shown with the wrong transfer function.
+    window.SetHdrOutput(needs_hdr);
     Recreate(width, height);
     ImGui::Core::OnSurfaceFormatChange(needs_hdr ? SURFACE_FORMAT_HDR.format
                                                  : surface_format.format);
@@ -158,12 +161,19 @@ void Swapchain::FindPresentFormat() {
     // Check if the device supports HDR formats. Here we care of Rec.2020 PQ only as it is expected
     // game output. Other variants as e.g. linear Rec.2020 will require additional color space
     // rotation
-    supports_hdr =
+    const bool surface_has_pq =
         std::find_if(formats.begin(), formats.end(), [](const vk::SurfaceFormatKHR& format) {
             return format == SURFACE_FORMAT_HDR;
         }) != formats.end();
-    // Also make sure that user allowed us to use HDR
-    supports_hdr &= EmulatorSettings.IsHdrAllowed();
+    // Also make sure that user allowed us to use HDR: `allowed` is the decision and not the BB_HDR
+    // value, since leaving it unset follows the display (see bbport_hdr.h).
+    const bool allowed = EmulatorSettings.IsHdrAllowed();
+    supports_hdr = surface_has_pq && allowed;
+    // The two inputs have different fixes -- a setting, or a driver with no PQ pair -- and either
+    // one leaves the game's own HDR setting disabled, which nothing in the frame shows.
+    // tools/macos_check.py reads this line.
+    LOG_INFO(Render_Vulkan, "GPU_HDR: allowed={} surface_pq={} pairs={}", allowed, surface_has_pq,
+             formats.size());
 
     // If there is a single undefined surface format, the device doesn't care, so we'll just use
     // RGBA sRGB.

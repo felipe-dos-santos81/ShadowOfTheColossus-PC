@@ -293,6 +293,19 @@ u32 BbDisplayRefreshHz() {
     return hz;
 }
 
+bool BbDisplayHdrAvailable() {
+    // SDL's own words: the display has HDR headroom above the SDR white point. That is the signal
+    // the game's HDR output needs; on a display without it the port stays SDR, exactly as before.
+    static const bool available = [] {
+        const SDL_PropertiesID props = SDL_GetDisplayProperties(SDL_GetPrimaryDisplay());
+        const bool hdr = props != 0 &&
+                         SDL_GetBooleanProperty(props, SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
+        std::printf("GPU: display %s HDR headroom\n", hdr ? "reports" : "reports no");
+        return hdr;
+    }();
+    return available;
+}
+
 #ifdef BB_PGO_GENERATE
 extern "C" void __gcov_dump(void);
 extern "C" void __gcov_reset(void);

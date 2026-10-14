@@ -4,9 +4,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <string>
+#include "bbport_hdr.h"
 #include "common/types.h"
 
 u32 BbDisplayRefreshHz(); // bbgpu.cpp: primary display refresh rate, 60 when unknown
+bool BbDisplayHdrAvailable(); // bbgpu.cpp: the primary display reports HDR headroom
 
 enum GpuReadbacksMode : int { Disabled, Relaxed, Precise };
 
@@ -59,7 +61,13 @@ public:
     bool IsDirectMemoryAccessEnabled() { static const auto value = Flag("BB_DIRECT_MEMORY_ACCESS", true); return value; }
     bool IsDumpShaders() { static const auto value = Flag("BB_DUMP_SHADERS", false); return value; }
     bool IsFsrEnabled() { static const auto value = Flag("BB_FSR1", false); return value; }
-    bool IsHdrAllowed() { static const auto value = Flag("BB_HDR", false); return value; }
+    // sotc: BB_HDR overrides; without it the display decides (an HDR-capable screen enables the
+    // game's own HDR setting, a plain one keeps the SDR behaviour). It used to be off unless set,
+    // which left that setting disabled on the XDR panels that can show it.
+    bool IsHdrAllowed() {
+        static const bool value = BbHdrAllowed(std::getenv("BB_HDR"), BbDisplayHdrAvailable());
+        return value;
+    }
     bool IsNullGPU() { static const auto value = Flag("BB_NULL_GPU", false); return value; }
     bool IsPatchShaders() { return false; }
     bool IsInlineFetchShader() { return false; }

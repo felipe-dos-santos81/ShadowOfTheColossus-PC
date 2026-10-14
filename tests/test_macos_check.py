@@ -65,6 +65,29 @@ class CheckLog(unittest.TestCase):
         self.assertEqual(macos_check.check_log(GOOD, returncode=-6),
                          ['forbidden: exited before the deadline (rc -6)'])
 
+    def test_hdr_is_only_required_when_the_run_asked_for_it(self):
+        # The fixture has no GPU_HDR line: fine by default, a missing marker for an HDR run.
+        self.assertEqual(macos_check.check_log(GOOD), [])
+        self.assertIn('missing: hdr allowed', macos_check.check_log(GOOD, hdr=True))
+
+    def test_an_hdr_run_that_reached_the_surface_passes(self):
+        hdr = GOOD + 'GPU_HDR: allowed=true surface_pq=true pairs=60\n'
+        self.assertEqual(macos_check.check_log(hdr, hdr=True), [])
+
+    def test_an_hdr_run_on_a_driver_without_the_pq_pair_fails(self):
+        # Allowed but not presentable: the game's own HDR setting would stay disabled.
+        hdr = GOOD + 'GPU_HDR: allowed=true surface_pq=false pairs=5\n'
+        self.assertIn('missing: surface offers the pq format', macos_check.check_log(hdr, hdr=True))
+
+
+class HdrRequest(unittest.TestCase):
+    def test_requires_hdr_reads_the_ports_truthiness(self):
+        for value in ('1', 'yes', 'true'):
+            self.assertTrue(macos_check.requires_hdr({'BB_HDR': value}), value)
+        for value in ('0', 'no', 'false', '', 'on'):
+            self.assertFalse(macos_check.requires_hdr({'BB_HDR': value}), value)
+        self.assertFalse(macos_check.requires_hdr({}))
+
 
 class RunResult(unittest.TestCase):
     def test_run_returns_problems_and_log(self):  # the result reads, and still unpacks

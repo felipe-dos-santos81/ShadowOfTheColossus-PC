@@ -89,7 +89,8 @@ Darwin*)
         -DVCPKG_TARGET_TRIPLET=x64-osx "${vcpkg_flags[@]}" \
         -DVCPKG_INSTALLED_DIR="$PWD/out/vcpkg_installed" >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF} (x86-64, Rosetta 2)"
-    tests=(compat-mac-test pad-test file-mods-test content-test runtime-test sema-test window-scale-test)
+    tests=(compat-mac-test pad-test file-mods-test content-test runtime-test sema-test
+           window-scale-test hdr-setting-test metal-layer-edr-test)
     targets=(bb-probe bb-gpu-capabilities)
     if [[ ${1:-} == --test ]]; then targets+=("${tests[@]}"); fi
     if ! ninja -C out/gpu "${targets[@]}" > out/gpu-build.log 2>&1; then
@@ -182,10 +183,14 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
-    # The windowed-mode size clamp is header-only. The GPU library is C++ too, so a box that got
-    # this far has a C++ compiler; a missing one is a broken environment, not a reason to skip.
+    # Header-only tests (the windowed-mode size clamp, the HDR decision). The GPU library is C++
+    # too, so a box that got this far has a C++ compiler; a missing one is a broken environment,
+    # not a reason to skip.
     CXX=${CXX:-$(command -v c++ || command -v g++ || true)}
-    [[ -n $CXX ]] || { echo 'Need a C++ compiler (set CXX) for the window-size test.' >&2; exit 1; }
-    "$CXX" -std=c++17 -O2 -g -Wall -Wextra -Werror -Igpu/shim tests/test_window_scale.cpp -o out/window-scale-test
-    out/window-scale-test
+    [[ -n $CXX ]] || { echo 'Need a C++ compiler (set CXX) for the header-only tests.' >&2; exit 1; }
+    for header_test in window_scale hdr_setting; do
+        "$CXX" -std=c++17 -O2 -g -Wall -Wextra -Werror -Igpu/shim "tests/test_${header_test}.cpp" \
+            -o "out/${header_test//_/-}-test"
+        "out/${header_test//_/-}-test"
+    done
 fi

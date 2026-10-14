@@ -64,6 +64,12 @@ de saves pela lista na tela.
 controle (DualShock 4, DualSense, Xbox) com câmera no mouse e troca de teclas; cvars do motor. O
 registro de cada sessão fica em `user/last_run.log`.
 
+**HDR.** Numa tela que anuncia HDR o port liga a saída HDR sozinho e avisa o jogo que a saída faz
+BT.2020 PQ — é isso que faz o ajuste de HDR do próprio jogo aparecer no menu dele. Os quadros saem
+em Rec.2020 + PQ, apresentados no macOS com *extended dynamic range*. `BB_HDR=0` força SDR; na
+mão contrária, `BB_HDR=1` liga o HDR mesmo numa tela que o sistema não anuncia como HDR, e
+`BB_HDR=1 make verify` confere a cadeia inteira.
+
 Em modo 60 FPS o demo da tela de título rende **37–45 → ~67 FPS** numa RTX 2060 SUPER, com
 **~17 → 29–34 FPS** na ponte do cânion. Só Vulkan: qualquer placa com DirectX 12 moderno tem
 Vulkan 1.3.
@@ -150,6 +156,12 @@ create/load/delete from the in-game list.
 renders at 1080p, upscaled with FSR 1 + RCAS); PS4 Pro mode; 60 FPS and 16x AF; controllers
 (DualShock 4, DualSense, Xbox) with mouse camera and key remapping; engine cvars. Each session
 logs to `user/last_run.log`.
+
+**HDR.** On a display that reports HDR the port enables HDR output on its own and tells the game
+the output can do BT.2020 PQ — which is what makes the game's own HDR setting appear in its menu.
+Frames go out as Rec.2020 + PQ, presented on macOS with extended dynamic range. `BB_HDR=0` forces
+SDR; the other way, `BB_HDR=1` enables HDR even on a display the system does not report as HDR,
+and `BB_HDR=1 make verify` checks the whole chain.
 
 In 60 FPS mode the title-screen attract demo averages **37–45 → ~67 FPS** on an RTX 2060 SUPER,
 with **~17 → 29–34 FPS** in its heaviest section (the canyon bridge). Vulkan only: every card with

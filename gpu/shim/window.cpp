@@ -14,6 +14,11 @@
 #include "bbport_overlay.h"
 #include "video_core/renderdoc.h"
 
+#ifdef __APPLE__
+// gpu/shim/macos/metal_layer_edr.mm: the CAMetalLayer's HDR (EDR) state.
+extern "C" void bb_metal_layer_set_hdr(void* layer, int enabled);
+#endif
+
 namespace Frontend {
 
 // sotc: mouse cursor is never locked or grabbed to the window.
@@ -112,6 +117,17 @@ WindowSDL::~WindowSDL() {
     if (metal_view) SDL_Metal_DestroyView(metal_view);
 #endif
     SDL_DestroyWindow(window);
+}
+
+void WindowSDL::SetHdrOutput([[maybe_unused]] bool hdr) {
+#ifdef __APPLE__
+    // SDL's HDR properties are read-only and SDL_Metal_CreateView leaves the layer to the caller,
+    // so the layer is the port's to set (gpu/shim/macos/metal_layer_edr.mm). A PQ frame on an SDR
+    // layer, or the reverse, is shown with the wrong transfer function.
+    if (window_info.type == WindowSystemType::Metal && window_info.render_surface != nullptr) {
+        bb_metal_layer_set_hdr(window_info.render_surface, hdr ? 1 : 0);
+    }
+#endif
 }
 
 void WindowSDL::BeginTextInput(const std::string& initial, const std::string& prompt) {

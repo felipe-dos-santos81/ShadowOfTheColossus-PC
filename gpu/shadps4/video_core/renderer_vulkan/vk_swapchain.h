@@ -19,7 +19,7 @@ class Scheduler;
 
 class Swapchain {
 public:
-    explicit Swapchain(const Instance& instance, const Frontend::WindowSDL& window);
+    explicit Swapchain(const Instance& instance, Frontend::WindowSDL& window);
     ~Swapchain();
 
     /// Creates (or recreates) the swapchain with a given size.
@@ -113,7 +113,7 @@ private:
 
 private:
     const Instance& instance;
-    const Frontend::WindowSDL& window;
+    Frontend::WindowSDL& window;
     vk::SwapchainKHR swapchain{};
     vk::SurfaceKHR surface{};
     vk::SurfaceFormatKHR surface_format;

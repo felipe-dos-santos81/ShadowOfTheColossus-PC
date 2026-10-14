@@ -7,7 +7,9 @@
 Exit 0 when the run is acceptable, 1 with the problems it found. The markers tell "the port
 runs" apart from "the port did not": the image below 2 GiB, a windowed window with the cursor
 free, a Vulkan presenter, and a chosen BPE heap. A STOP:, an assertion failure, or a Python
-traceback is a failure even when every marker appears.
+traceback is a failure even when every marker appears. With `BB_HDR=1` the run is also held to
+HDR reaching the display, since a request the surface cannot present leaves the game's own HDR
+setting disabled and nothing in the frame shows it.
 """
 import argparse
 import os
@@ -38,6 +40,13 @@ MARKERS = (
     ('heap guard', r'BPE heap guard on heap'),
 )
 
+# Held to only when the run asked for HDR (`BB_HDR=1 make verify`): the request has to reach the
+# display, which is the difference between the game's own HDR setting appearing and not appearing.
+HDR_MARKERS = (
+    ('hdr allowed', r'GPU_HDR: allowed=true'),
+    ('surface offers the pq format', r'GPU_HDR: .*surface_pq=true'),
+)
+
 FORBIDDEN = (
     ('stopped', r'STOP:'),
     ('assertion', r'[Aa]ssertion [Ff]ailed'),
@@ -45,14 +54,21 @@ FORBIDDEN = (
 )
 
 
-def check_log(log, returncode=None):
+def requires_hdr(env=None):
+    """Whether the run asked for HDR: BB_HDR=1, with the port's truthiness (gpu/shim/bbport_hdr.h)."""
+    source = os.environ if env is None else env
+    return source.get('BB_HDR', '')[:1] in ('1', 'y', 't')
+
+
+def check_log(log, returncode=None, hdr=False):
     """The problems a captured log has, in marker order; empty when the run is acceptable.
 
     `returncode` is the process's status when it stopped on its own before the gate's deadline
     (None when the gate ended it, or when it exited cleanly): a crash after every marker appeared
-    is still a failure.
+    is still a failure. `hdr` adds the HDR markers, for a run that asked for HDR.
     """
-    problems = [f'missing: {name}' for name, pattern in MARKERS if not re.search(pattern, log)]
+    markers = MARKERS + (HDR_MARKERS if hdr else ())
+    problems = [f'missing: {name}' for name, pattern in markers if not re.search(pattern, log)]
     if returncode is not None:
         problems.append(f'forbidden: exited before the deadline (rc {returncode})')
     problems += [f'forbidden: {name}' for name, pattern in FORBIDDEN if re.search(pattern, log)]
@@ -106,7 +122,7 @@ def run(port, seconds=30.0, command=None):
     # The gate ends the run itself, so a process that stopped on its own is a failure: a clean
     # exit or a signal, after the markers, is not the "still running" a PASS claims.
     returncode = None if ended_by_gate or process.returncode == 0 else process.returncode
-    return Run(check_log(log, returncode), log)
+    return Run(check_log(log, returncode, hdr=requires_hdr(child_env)), log)
 
 
 def main(argv=None):

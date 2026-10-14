@@ -2,6 +2,10 @@
 # drivers, adapted to the native_probe runtime through shims in shim/.
 cmake_minimum_required(VERSION 3.24)
 project(bbgpu LANGUAGES C CXX)
+if (APPLE)
+    # The window's HDR (EDR) state is Objective-C++ (shim/macos/metal_layer_edr.mm).
+    enable_language(OBJCXX)
+endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -209,7 +213,11 @@ elseif (APPLE)
     # own frameworks come through its static .pc (pkgconf static mode, see build.sh).
     target_include_directories(bbgpu PRIVATE third_party/xbyak shim/macos)
     target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/macos/bb_mac_compat.h)
-    target_link_libraries(bbgpu PUBLIC Vulkan::Vulkan "-framework QuartzCore" "-framework Metal")
+    # Objective-C++: the HDR (EDR) state of the window's CAMetalLayer. The .mm is not in the
+    # shim/*.cpp glob, so it is named here, in the macOS-only block.
+    target_sources(bbgpu PRIVATE shim/macos/metal_layer_edr.mm)
+    target_link_libraries(bbgpu PUBLIC Vulkan::Vulkan "-framework QuartzCore" "-framework Metal"
+        "-framework CoreGraphics")
 else()
     target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
 endif()
@@ -278,6 +286,13 @@ if (WIN32 OR APPLE)
         target_compile_definitions(content-test PRIVATE _GNU_SOURCE)
         target_link_libraries(runtime-test PRIVATE bbgpu atrac9 Vulkan::Vulkan)
         target_link_libraries(sema-test PRIVATE bbgpu atrac9 Vulkan::Vulkan)
+        # The window layer's HDR (EDR) state: Objective-C++ with the layer object, no window needed.
+        add_executable(metal-layer-edr-test EXCLUDE_FROM_ALL ../tests/test_metal_layer_edr.mm
+            shim/macos/metal_layer_edr.mm)
+        set_target_properties(metal-layer-edr-test PROPERTIES BUILD_RPATH "@executable_path")
+        target_compile_options(metal-layer-edr-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+        target_link_libraries(metal-layer-edr-test PRIVATE "-framework QuartzCore" "-framework Metal"
+            "-framework CoreGraphics" "-framework CoreFoundation")
     endif()
 endif()
 
@@ -289,6 +304,9 @@ target_include_directories(motion-history-test PRIVATE ..)
 add_executable(window-scale-test EXCLUDE_FROM_ALL ../tests/test_window_scale.cpp)
 target_compile_options(window-scale-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(window-scale-test PRIVATE shim)
+add_executable(hdr-setting-test EXCLUDE_FROM_ALL ../tests/test_hdr_setting.cpp)
+target_compile_options(hdr-setting-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(hdr-setting-test PRIVATE shim)
 add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(motion-shader-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(motion-shader-test PRIVATE bbgpu)
