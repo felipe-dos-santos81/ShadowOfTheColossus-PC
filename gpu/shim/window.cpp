@@ -64,6 +64,14 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetWindowRelativeMouseMode(window, false);
     SDL_SetWindowMouseGrab(window, false);
     SDL_ShowCursor();
+    // The acceptance gate (tools/macos_check.py) reads this line. It is written straight to
+    // stderr, not through the logging system: an INFO record is buffered and lost when the gate
+    // ends the process with SIGTERM, and this reports the state SDL actually holds, so
+    // "windowed with the cursor free" is checked on the live window.
+    std::fprintf(stderr, "Window %dx%d %s: relative mouse %s, grab %s\n", width_, height_,
+                 (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) ? "fullscreen" : "windowed",
+                 SDL_GetWindowRelativeMouseMode(window) ? "on" : "off",
+                 SDL_GetWindowMouseGrab(window) ? "on" : "off");
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
