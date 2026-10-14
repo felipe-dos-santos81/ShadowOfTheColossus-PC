@@ -141,8 +141,9 @@ def extract_pkg(pkg, out, tool=None):
     sce_sys.mkdir(parents=True, exist_ok=True)
     for entry_id, name in (('11', 'param.sfo'), ('12', 'playgo-chunk.dat'), ('17', 'pic1.png'), ('19', 'icon0.png')):
         subprocess.run([str(tool), 'pkg_extractentry', str(pkg), entry_id, str(sce_sys / name)], check=False)
-    # A previous run may have left a symlink or a partial real directory (an interrupted extract).
-    if target.is_symlink():
+    # A previous run may have left a symlink, a partial real directory (an interrupted extract),
+    # or a stray file: replace whatever is there with the fresh extract's symlink.
+    if target.is_symlink() or target.is_file():
         target.unlink()
     elif target.is_dir():
         shutil.rmtree(target)

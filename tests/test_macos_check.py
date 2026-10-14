@@ -15,6 +15,14 @@ GPU: window and Vulkan presenter ready; SDK 0x04508101, 327 HLE symbols
 Runtime: BPE heap guard on heap 0x1f6fc700 (2000 of 2000 frees)
 """
 
+# A stub that prints every marker, for the process-control tests (no GPU needed).
+MARKER_LINES = (
+    'Image at 0x1c900000 (below 2 GiB, pointers)',
+    'Window 1280x720 windowed: relative mouse off, grab off',
+    'GPU: window and Vulkan presenter ready',
+    'Runtime: BPE heap guard on heap 0x1f6fc700',
+)
+
 
 class CheckLog(unittest.TestCase):
     def test_accepts_a_complete_run(self):
@@ -41,13 +49,37 @@ class CheckLog(unittest.TestCase):
         self.assertEqual(macos_check.check_log(GOOD + 'Traceback (most recent call last):\n'),
                          ['forbidden: python traceback'])
 
+    def test_reports_an_early_exit(self):
+        self.assertEqual(macos_check.check_log(GOOD, returncode=-6),
+                         ['forbidden: exited before the deadline (rc -6)'])
+
+
+class ProcessControl(unittest.TestCase):
+    def markers_then(self, tail):
+        script = ''.join(f'echo {line!r}\n' for line in MARKER_LINES) + tail + '\n'
+        return ['bash', '-c', script]
+
     def test_run_kills_a_group_that_ignores_sigterm(self):  # Review Focus 4
         start = time.monotonic()
-        ok, log = macos_check.run(ROOT, seconds=1.0,
-                                  command=['bash', '-c', 'trap "" TERM; echo marker; sleep 30'])
-        self.assertFalse(ok)
+        problems, log = macos_check.run(ROOT, seconds=1.0,
+                                        command=['bash', '-c', 'trap "" TERM; echo marker; sleep 30'])
+        self.assertTrue(problems)
         self.assertIn('marker', log)
         self.assertLess(time.monotonic() - start, 20)
+
+    def test_run_accepts_a_run_the_gate_itself_ends(self):
+        # Every marker, then it keeps running: the gate ends it, which is a pass.
+        problems, _ = macos_check.run(ROOT, seconds=1.0, command=self.markers_then('sleep 30'))
+        self.assertEqual(problems, [])
+
+    def test_run_fails_a_game_that_dies_after_the_markers(self):  # a crash is not a pass
+        problems, _ = macos_check.run(ROOT, seconds=5.0, command=self.markers_then('exit 7'))
+        self.assertEqual(problems, ['forbidden: exited before the deadline (rc 7)'])
+
+    def test_run_enables_the_gpu_log_that_names_the_driver(self):  # Review Focus 3
+        _, log = macos_check.run(ROOT, seconds=1.0,
+                                 command=['bash', '-c', 'echo "BB_GPU_LOG=$BB_GPU_LOG"'])
+        self.assertIn('BB_GPU_LOG=info', log)
 
 
 if __name__ == '__main__':

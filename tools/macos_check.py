@@ -35,21 +35,31 @@ FORBIDDEN = (
 )
 
 
-def check_log(log):
-    """The problems a captured log has, in marker order; empty when the run is acceptable."""
+def check_log(log, returncode=None):
+    """The problems a captured log has, in marker order; empty when the run is acceptable.
+
+    `returncode` is the process's status when it stopped on its own before the gate's deadline
+    (None when the gate ended it, or when it exited cleanly): a crash after every marker appeared
+    is still a failure.
+    """
     problems = [f'missing: {name}' for name, pattern in MARKERS if not re.search(pattern, log)]
+    if returncode is not None:
+        problems.append(f'forbidden: exited before the deadline (rc {returncode})')
     problems += [f'forbidden: {name}' for name, pattern in FORBIDDEN if re.search(pattern, log)]
     return problems
 
 
 def run(port, seconds=30.0, command=None, env=None):
-    """Run the port for `seconds`, end its process group, and return (acceptable, log).
+    """Run the port for `seconds`, end its process group, and return (problems, log).
 
     The output is drained on a thread so a process that stops printing cannot block the deadline;
     the process group gets SIGTERM and, if it is ignored, SIGKILL (a game that never closes its
-    window must not hang the gate).
+    window must not hang the gate). The gate raises the GPU log to `info` so the Vulkan driver it
+    tried is named: the port's default threshold is `warning`, which filters that one line.
     """
-    process = subprocess.Popen(command or [sys.executable, 'sotc.py'], cwd=port, env=env,
+    child_env = dict(os.environ if env is None else env)
+    child_env.setdefault('BB_GPU_LOG', 'info')
+    process = subprocess.Popen(command or [sys.executable, 'sotc.py'], cwd=port, env=child_env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                start_new_session=True)
     lines = []
@@ -58,7 +68,8 @@ def run(port, seconds=30.0, command=None, env=None):
     deadline = time.monotonic() + seconds
     while process.poll() is None and time.monotonic() < deadline:
         time.sleep(0.05)
-    if process.poll() is None:
+    ended_by_gate = process.poll() is None
+    if ended_by_gate:
         os.killpg(os.getpgid(process.pid), signal.SIGTERM)
         try:
             process.wait(timeout=5)
@@ -68,7 +79,10 @@ def run(port, seconds=30.0, command=None, env=None):
     reader.join(timeout=5)
     process.stdout.close()
     log = ''.join(lines)
-    return (not check_log(log), log)
+    # The gate ends the run itself, so a process that stopped on its own is a failure: a clean
+    # exit or a signal, after the markers, is not the "still running" a PASS claims.
+    returncode = None if ended_by_gate or process.returncode == 0 else process.returncode
+    return check_log(log, returncode), log
 
 
 def main(argv=None):
@@ -76,11 +90,11 @@ def main(argv=None):
     parser.add_argument('--seconds', type=float, default=30.0,
                         help='how long to let the game run (default: 30)')
     args = parser.parse_args(argv)
-    ok, log = run(PORT, seconds=args.seconds)
-    if ok:
+    problems, log = run(PORT, seconds=args.seconds)
+    if not problems:
         print('macos_check: PASS')
         return 0
-    for problem in check_log(log):
+    for problem in problems:
         print(problem, file=sys.stderr)
     print('--- captured log ---', file=sys.stderr)
     sys.stderr.write(log)

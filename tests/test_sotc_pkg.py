@@ -42,6 +42,11 @@ class ExtractPkg(unittest.TestCase):
         (good / 'sce_sys' / 'param.sfo').write_text('x')
         self.assertEqual(sotc.extract_pkg(self.out / 'game.pkg', self.out, tool=self.tool), good)
 
+    def test_replaces_a_stale_regular_file(self):
+        (self.out / 'CUSA08809').write_text('a leftover file, not a directory')
+        target = sotc.extract_pkg(self.out / 'game.pkg', self.out, tool=self.tool)
+        self.assertTrue((target / 'eboot.bin').is_file())
+
 
 class MissingGame(unittest.TestCase):
     def test_missing_game_is_a_message_not_a_traceback(self):  # Review Focus 2
