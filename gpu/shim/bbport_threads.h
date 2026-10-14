@@ -10,6 +10,8 @@
 #ifdef _WIN32
 #include <bit>
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/resource.h>
 #else
 #include <sched.h>
 #include <sys/resource.h>
@@ -30,6 +32,16 @@ inline unsigned Available() {
 /// The calling thread only runs when cores are otherwise idle (lowest Windows priority).
 inline void MakeBackground() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+}
+#elif defined(__APPLE__)
+/// Hardware threads available to the process (macOS has no affinity masks).
+inline unsigned Available() {
+    return std::max(1u, std::thread::hardware_concurrency());
+}
+
+/// Background QoS: the scheduler gives this thread only otherwise idle time.
+inline void MakeBackground() {
+    setpriority(PRIO_DARWIN_THREAD, 0, PRIO_DARWIN_BG);
 }
 #else
 

@@ -6,6 +6,7 @@
 #include <cstring>
 #include "common/assert.h"
 #include "common/bit_field.h"
+#include <type_traits>
 #include "common/types.h"
 #include "common/uint128.h"
 #include "core/libraries/gnmdriver/gnmdriver.h"
@@ -758,7 +759,11 @@ struct PM4CmdWriteData {
 
     template <typename T>
     T Address() const {
-        return reinterpret_cast<T>(addr64);
+        if constexpr (std::is_pointer_v<T>) {
+            return reinterpret_cast<T>(addr64);
+        } else {
+            return static_cast<T>(addr64);
+        }
     }
 };
 

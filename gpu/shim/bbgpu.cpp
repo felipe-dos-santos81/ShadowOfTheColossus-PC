@@ -210,7 +210,12 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
 }
 boost::icl::interval_set<VAddr> AddressSpace::GetUsableRegions() {
     boost::icl::interval_set<VAddr> set;
+#ifdef __APPLE__
+    set += boost::icl::interval<VAddr>::right_open(0x07'0000'0000ULL, 0x08'0000'0000ULL);
+    set += boost::icl::interval<VAddr>::right_open(0x70'0000'0000ULL, 0xfc'0000'0000ULL);
+#else
     set += boost::icl::interval<VAddr>::right_open(0x10'0000'0000ULL, 0xfc'0000'0000ULL);
+#endif
     return set;
 }
 } // namespace Core
@@ -241,6 +246,41 @@ std::thread g_window_thread;
 std::mutex g_window_mutex;
 std::condition_variable g_window_cv;
 bool g_window_ready;
+
+static Frontend::WindowSDL* CreateWindow(const std::string& title, s32 width, s32 height) {
+    auto* window = new Frontend::WindowSDL(width, height, title.c_str());
+    {
+        std::scoped_lock lock{g_window_mutex};
+        g_window = window;
+        g_window_ready = true;
+    }
+    g_window_cv.notify_all();
+    return window;
+}
+static void PumpWindow(Frontend::WindowSDL* window) {
+    while (window->PollEvents()) {
+        SDL_Delay(2);
+    }
+    LOG_INFO(Frontend, "Window closed by user");
+    std::fflush(stdout);
+    std::_Exit(0);
+}
+static void WaitWindow() {
+    std::unique_lock lock{g_window_mutex};
+    g_window_cv.wait(lock, [] { return g_window_ready; });
+}
+#ifdef __APPLE__
+static bool g_window_requested;
+static std::string g_window_title;
+static s32 g_window_width, g_window_height;
+extern "C" void bbgpu_run_window_loop(void) {
+    {
+        std::unique_lock lock{g_window_mutex};
+        g_window_cv.wait(lock, [] { return g_window_requested; });
+    }
+    PumpWindow(CreateWindow(g_window_title, g_window_width, g_window_height));
+}
+#endif
 } // namespace
 
 u32 BbDisplayRefreshHz() {
@@ -284,29 +324,26 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     if (config->user_dir) setenv("BB_GPU_USER_DIR", config->user_dir, 0);
 #endif
     Core::Emulator::FillElfInfo(*config);
-    const std::string title = config->title ? config->title : "Bloodborne";
+    const std::string title = config->title ? config->title : "Shadow of the Colossus";
     const s32 width = config->width, height = config->height;
+#ifdef __APPLE__
+    {
+        std::scoped_lock lock{g_window_mutex};
+        g_window_title = title;
+        g_window_width = width;
+        g_window_height = height;
+        g_window_requested = true;
+    }
+    g_window_cv.notify_all();
+    WaitWindow();
+#else
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("bb:window");
-        auto* window = new Frontend::WindowSDL(width, height, title.c_str());
-        {
-            std::scoped_lock lock{g_window_mutex};
-            g_window = window;
-            g_window_ready = true;
-        }
-        g_window_cv.notify_all();
-        while (window->PollEvents()) {
-            SDL_Delay(2);
-        }
-        LOG_INFO(Frontend, "Window closed by user");
-        std::fflush(stdout);
-        std::_Exit(0);
+        PumpWindow(CreateWindow(title, width, height));
     });
     g_window_thread.detach();
-    {
-        std::unique_lock lock{g_window_mutex};
-        g_window_cv.wait(lock, [] { return g_window_ready; });
-    }
+    WaitWindow();
+#endif
     Core::Loader::SymbolsResolver resolver;
     // GnmDriver creates the presenter that the VideoOut present thread uses.
     Libraries::GnmDriver::RegisterLib(&resolver);

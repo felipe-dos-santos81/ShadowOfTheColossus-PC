@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/bbgpu.h"
 #include <stdlib.h>
 
 /* The settings menu of the GPU library restarts through probe.c, which tests do not link. */
@@ -358,6 +359,8 @@ int main(int argc,char **argv) {
         pthread_t askers[8]; uint32_t offsets[8];
         for (int i=0;i<8;++i) assert(pthread_create(&askers[i],NULL,tcb_offset_worker,&offsets[i])==0);
         for (int i=0;i<8;++i) { pthread_join(askers[i],NULL); assert(offsets[i]==offsets[0] && offsets[i]%8==0 && offsets[i]>0); }
+        float dx=1.0f, dy=1.0f; unsigned buttons=1;
+        assert(bbgpu_mouse_take(&dx,&dy,&buttons)==0 && dx==0.0f && dy==0.0f && buttons==0);
     }
 #endif
     runtime_start(0); assert(runtime_resolve("bzQExy189ZI",0)==0);

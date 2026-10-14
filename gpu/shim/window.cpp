@@ -1,9 +1,13 @@
-// bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+// bbport: SDL3 window for the Vulkan swapchain (X11, Wayland, Win32 or a CAMetalLayer on macOS).
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <SDL3/SDL_metal.h>
+#endif
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
@@ -12,33 +16,29 @@
 
 namespace Frontend {
 
-// sotc: the mouse as a PC camera. A click in the window captures it (relative mode, hidden
-// cursor); Esc or losing focus releases it. runtime_pad.c takes the motion as the right stick
-// and the buttons through its bindings (mouse.<input>=). SOTC_MOUSE=0 leaves the mouse alone.
+// sotc: mouse cursor is never locked or grabbed to the window.
 namespace {
 std::atomic<float> g_mouse_dx{0}, g_mouse_dy{0};
 std::atomic<u32> g_mouse_buttons{0};
 std::atomic<bool> g_mouse_captured{false};
-bool MouseEnabled() {
-    static const bool enabled = [] {
-        const char* v = std::getenv("SOTC_MOUSE");
-        return !v || v[0] != '0';
-    }();
-    return enabled;
-}
-void AddMotion(std::atomic<float>& total, float delta) {
-    float old = total.load(std::memory_order_relaxed);
-    while (!total.compare_exchange_weak(old, old + delta, std::memory_order_relaxed)) {
-    }
-}
 } // namespace
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
-    // sotc: the click that brings the window to the front also reaches the game (mouse capture).
-    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
+    }
+    const char* fullscreen = std::getenv("BB_FULLSCREEN");
+    const bool is_fullscreen = fullscreen && fullscreen[0] == '1';
+    if (!is_fullscreen) {
+        SDL_Rect usable{};
+        if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) &&
+            usable.w > 0 && usable.h > 0 &&
+            (width_ > usable.w * 9 / 10 || height_ > usable.h * 9 / 10)) {
+            const double scale = std::min(usable.w * 0.9 / width_, usable.h * 0.9 / height_);
+            width_ = static_cast<s32>(width_ * scale);
+            height_ = static_cast<s32>(height_ * scale);
+        }
     }
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
@@ -47,13 +47,23 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+#ifdef __APPLE__
+    // The Vulkan surface comes from the window's CAMetalLayer (VK_EXT_metal_surface, below), not
+    // from SDL's Vulkan support, which the Cocoa driver may lack.
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN, true);
+#else
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
-    const char* fullscreen = std::getenv("BB_FULLSCREEN");
-    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen && fullscreen[0] == '1');
+#endif
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, is_fullscreen);
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
+
+    // Ensure the mouse cursor is never locked or grabbed to the application window.
+    SDL_SetWindowRelativeMouseMode(window, false);
+    SDL_SetWindowMouseGrab(window, false);
+    SDL_ShowCursor();
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
@@ -61,6 +71,14 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (driver && !std::strcmp(driver, "windows")) {
         window_info.type = WindowSystemType::Windows;
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+    } else
+#elif defined(__APPLE__)
+    if (driver && !std::strcmp(driver, "cocoa")) {
+        // vk_platform.cpp builds the VK_EXT_metal_surface from this layer.
+        metal_view = SDL_Metal_CreateView(window);
+        ASSERT_MSG(metal_view, "Failed to create the Metal view: {}", SDL_GetError());
+        window_info.type = WindowSystemType::Metal;
+        window_info.render_surface = SDL_Metal_GetLayer(metal_view);
     } else
 #endif
     if (driver && !std::strcmp(driver, "x11")) {
@@ -82,6 +100,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 }
 
 WindowSDL::~WindowSDL() {
+#ifdef __APPLE__
+    if (metal_view) SDL_Metal_DestroyView(metal_view);
+#endif
     SDL_DestroyWindow(window);
 }
 
@@ -150,43 +171,6 @@ bool WindowSDL::PollEvents() {
         }
         if (BbOverlay::HandleEvent(event)) {
             continue;
-        }
-        if (std::getenv("SOTC_MOUSE_DEBUG") &&
-            (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_MOTION ||
-             event.type == SDL_EVENT_WINDOW_FOCUS_GAINED || event.type == SDL_EVENT_WINDOW_FOCUS_LOST)) {
-            static int shown = 0;
-            if (shown++ < 20) {
-                std::fprintf(stderr, "SOTC mouse debug: event 0x%x\n", event.type);
-            }
-        }
-        if (MouseEnabled()) {
-            const auto capture = [this](bool on) {
-                SDL_SetWindowRelativeMouseMode(window, on);
-                g_mouse_captured = on;
-                g_mouse_buttons = 0;
-                g_mouse_dx = 0;
-                g_mouse_dy = 0;
-                std::fprintf(stderr, "Runtime: mouse %s\n",
-                             on ? "captured for the camera (Esc releases it)" : "released");
-            };
-            if (!g_mouse_captured && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                                      event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)) {
-                capture(true); // a click (or coming back to the game) captures the mouse
-                continue;
-            }
-            if (g_mouse_captured) {
-                if (event.type == SDL_EVENT_MOUSE_MOTION) {
-                    AddMotion(g_mouse_dx, event.motion.xrel);
-                    AddMotion(g_mouse_dy, event.motion.yrel);
-                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                    g_mouse_buttons |= 1u << event.button.button;
-                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                    g_mouse_buttons &= ~(1u << event.button.button);
-                } else if ((event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) ||
-                           event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                    capture(false);
-                }
-            }
         }
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F12 && !event.key.repeat) {
             VideoCore::TriggerCapture(); // only does something when running under RenderDoc

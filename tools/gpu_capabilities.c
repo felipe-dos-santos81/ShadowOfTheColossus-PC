@@ -71,10 +71,16 @@ int main(int argc, char **argv) {
         .pApplicationName = "bbport scene scaling probe",
         .apiVersion = VK_API_VERSION_1_3,
     };
-    const VkInstanceCreateInfo create = {
+    VkInstanceCreateInfo create = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app,
     };
+#ifdef __APPLE__
+    /* MoltenVK is a portability driver: the loader lists it only when the instance asks. */
+    static const char *const portability[] = {"VK_KHR_portability_enumeration"};
+    create.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    create.enabledExtensionCount = 1; create.ppEnabledExtensionNames = portability;
+#endif
     VkInstance instance = VK_NULL_HANDLE;
     if (vkCreateInstance(&create, NULL, &instance) != VK_SUCCESS) {
         fputs("GPU scene scaling: cannot create Vulkan instance\n", stderr);

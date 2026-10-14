@@ -30,10 +30,9 @@ public:
     // bbport: these are called from guest code, which a C++ exception cannot unwind: a failed
     // join is logged and the thread detached instead.
     void Join() {
-        if (!thread.joinable()) return;
+        if (!thread.joinable() || thread.get_id() == std::this_thread::get_id()) return;
         try {
-            if (thread.get_id() == std::this_thread::get_id()) thread.detach();
-            else thread.join();
+            thread.join();
         } catch (const std::system_error& error) {
             // Windows (libc++ on Win32 threads): the join can fail although the thread is fine.
             // Wait for its function to return, so nothing it uses is freed under it, then let go.

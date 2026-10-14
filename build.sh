@@ -76,11 +76,18 @@ Darwin*)
         fi
     done
     export PKG_CONFIG_ALL_STATIC=1
+    if [[ ! -d out/vcpkg_installed/x64-osx && -d ../../theirs/bloodborne_pc/out/vcpkg_installed/x64-osx ]]; then
+        cp -a ../../theirs/bloodborne_pc/out/vcpkg_installed out/vcpkg_installed
+    fi
+    vcpkg_flags=(-DVCPKG_MANIFEST_DIR="$PWD/packaging/macos")
+    if [[ -d out/vcpkg_installed/x64-osx ]]; then
+        vcpkg_flags=(-DVCPKG_MANIFEST_INSTALL=OFF)
+    fi
     env -u VULKAN_SDK cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
         -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
         -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" \
-        -DVCPKG_TARGET_TRIPLET=x64-osx -DVCPKG_MANIFEST_DIR="$PWD/packaging/macos" \
-        -DVCPKG_INSTALLED_DIR="$PWD/out/vcpkg_installed"
+        -DVCPKG_TARGET_TRIPLET=x64-osx "${vcpkg_flags[@]}" \
+        -DVCPKG_INSTALLED_DIR="$PWD/out/vcpkg_installed" >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF} (x86-64, Rosetta 2)"
     tests=(compat-mac-test pad-test file-mods-test content-test runtime-test sema-test)
     targets=(bb-probe bb-gpu-capabilities)
