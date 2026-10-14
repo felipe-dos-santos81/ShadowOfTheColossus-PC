@@ -25,6 +25,7 @@ MARKERS = (
     ('image below 2 GiB', r'Image at 0x[0-9a-f]+ \(below 2 GiB'),
     ('windowed, unlocked cursor', r'Window \d+x\d+ windowed: relative mouse off, grab off'),
     ('presenter ready', r'window and Vulkan presenter ready'),
+    ('vulkan driver named', r'GPU_Vulkan_Driver: \S+'),
     ('heap guard', r'BPE heap guard on heap'),
 )
 
@@ -49,7 +50,7 @@ def check_log(log, returncode=None):
     return problems
 
 
-def run(port, seconds=30.0, command=None, env=None):
+def run(port, seconds=30.0, command=None):
     """Run the port for `seconds`, end its process group, and return (problems, log).
 
     The output is drained on a thread so a process that stops printing cannot block the deadline;
@@ -57,7 +58,7 @@ def run(port, seconds=30.0, command=None, env=None):
     window must not hang the gate). The gate raises the GPU log to `info` so the Vulkan driver it
     tried is named: the port's default threshold is `warning`, which filters that one line.
     """
-    child_env = dict(os.environ if env is None else env)
+    child_env = dict(os.environ)
     child_env.setdefault('BB_GPU_LOG', 'info')
     process = subprocess.Popen(command or [sys.executable, 'sotc.py'], cwd=port, env=child_env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

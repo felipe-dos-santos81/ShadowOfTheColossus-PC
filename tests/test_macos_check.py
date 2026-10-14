@@ -1,16 +1,17 @@
 """The macOS acceptance gate's log checker, driven by captured logs (no GPU)."""
 import sys
-from pathlib import Path
 import time
 import unittest
 
-ROOT = Path(__file__).resolve().parent.parent
+from paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 from tools import macos_check
 
 GOOD = """
 Image at 0x1c900000 (below 2 GiB, as the game's 31-bit pointers need); loader at 0x4ea5d70
 GPU [Frontend] <Info> Window 1280x720 windowed: relative mouse off, grab off
+GPU [Render.Vulkan] <Info> vk_instance.cpp:740 CollectDeviceParameters: GPU_Vulkan_Driver: KosmicKrisp 26.2.99
 GPU: window and Vulkan presenter ready; SDK 0x04508101, 327 HLE symbols
 Runtime: BPE heap guard on heap 0x1f6fc700 (2000 of 2000 frees)
 """
@@ -20,6 +21,7 @@ MARKER_LINES = (
     'Image at 0x1c900000 (below 2 GiB, pointers)',
     'Window 1280x720 windowed: relative mouse off, grab off',
     'GPU: window and Vulkan presenter ready',
+    'GPU_Vulkan_Driver: KosmicKrisp 26.2.99',
     'Runtime: BPE heap guard on heap 0x1f6fc700',
 )
 
@@ -48,6 +50,10 @@ class CheckLog(unittest.TestCase):
     def test_reports_a_traceback(self):
         self.assertEqual(macos_check.check_log(GOOD + 'Traceback (most recent call last):\n'),
                          ['forbidden: python traceback'])
+
+    def test_reports_a_run_that_never_names_the_driver(self):  # Review Focus 3
+        without = '\n'.join(line for line in GOOD.splitlines() if 'GPU_Vulkan_Driver' not in line)
+        self.assertIn('missing: vulkan driver named', macos_check.check_log(without))
 
     def test_reports_an_early_exit(self):
         self.assertEqual(macos_check.check_log(GOOD, returncode=-6),

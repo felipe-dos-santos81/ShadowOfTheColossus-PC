@@ -1,13 +1,14 @@
 """extract_pkg must replace a stale real directory, not crash on it, and a missing game must be a
 message rather than a traceback."""
 import os
-import sys
-from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 import sotc
 

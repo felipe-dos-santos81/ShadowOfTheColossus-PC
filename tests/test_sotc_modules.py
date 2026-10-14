@@ -1,10 +1,11 @@
 """sotc.py's sound-module selection: preset, missing file, and unset all have a stated result."""
 import sys
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 import sotc
 
