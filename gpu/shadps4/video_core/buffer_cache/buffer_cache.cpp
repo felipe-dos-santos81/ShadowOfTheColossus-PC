@@ -169,6 +169,9 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         flush_request();
         return;
     }
+    // SOTC_RB_ASYNC=1 (experimental): the guest thread waits for the GPU instead of the command
+    // processor (measured +10-18% at 120 Hz vblank), but rare runs hit the page manager's
+    // write-only protection assertion, so it stays off until that state is fixed.
     static const bool async = [] {
         const char* v = std::getenv("SOTC_RB_ASYNC");
         return v && v[0] == '1';
