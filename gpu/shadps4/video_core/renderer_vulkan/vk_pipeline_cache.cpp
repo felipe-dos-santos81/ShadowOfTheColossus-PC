@@ -378,7 +378,10 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         have_last = true;
         SotcStats::draw_key_total.fetch_add(1, std::memory_order_relaxed);
     }
-    const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
+    const auto [it, is_new] = [&] {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_lookup_ns, SotcStats::draw_sample};
+        return graphics_pipelines.try_emplace(graphics_key);
+    }();
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
@@ -481,8 +484,11 @@ bool PipelineCache::RefreshGraphicsKey() {
     }
 
     // Compile and bind shader stages
-    if (!RefreshGraphicsStages()) {
-        return false;
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_stages_ns, SotcStats::draw_sample};
+        if (!RefreshGraphicsStages()) {
+            return false;
+        }
     }
 
     // Second pass to mask out render targets not written by shader and fill remaining info
@@ -551,8 +557,13 @@ bool PipelineCache::RefreshGraphicsStages() {
         }
 
         const auto params = AmdGpu::GetParams(*pgm);
-        std::tie(infos[stage_out_idx], modules[stage_out_idx], key.stage_hashes[stage_out_idx]) =
-            GetProgram(stage_in, stage_out, params, binding);
+        {
+            const SotcStats::DrawPhaseTimer phase{SotcStats::draw_getprogram_ns,
+                                                  SotcStats::draw_sample};
+            std::tie(infos[stage_out_idx], modules[stage_out_idx],
+                     key.stage_hashes[stage_out_idx]) = GetProgram(stage_in, stage_out, params,
+                                                                   binding);
+        }
         return true;
     };
 
@@ -714,7 +725,10 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
-    info.RefreshFlatBuf();
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_flatbuf_ns, SotcStats::draw_sample};
+        info.RefreshFlatBuf();
+    }
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
     size_t perm_idx = program->modules.size();

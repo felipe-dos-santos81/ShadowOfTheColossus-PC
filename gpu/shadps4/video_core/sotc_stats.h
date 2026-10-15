@@ -118,6 +118,20 @@ inline bool DrawStatsEnabled() {
 inline std::atomic<uint64_t> draw_key_total{0};
 inline std::atomic<uint64_t> draw_key_repeats{0};
 
+/// sotc: whether the draw being recorded is the sampled one (set by the draw paths, read by the
+/// pipeline cache and the resource binding code to time their sub-phases).
+inline thread_local bool draw_sample = false;
+
+/// Sub-phases of the sampled draw: shader stages/permutations, pipeline map lookup, render state
+/// preparation, buffer descriptor building and texture descriptor building.
+inline std::atomic<uint64_t> draw_stages_ns{0};
+inline std::atomic<uint64_t> draw_lookup_ns{0};
+inline std::atomic<uint64_t> draw_prepare_ns{0};
+inline std::atomic<uint64_t> draw_bufbind_ns{0};
+inline std::atomic<uint64_t> draw_texbind_ns{0};
+inline std::atomic<uint64_t> draw_getprogram_ns{0};
+inline std::atomic<uint64_t> draw_flatbuf_ns{0};
+
 /// True for the draws that SOTC_DRAW_STATS samples (1 in SOTC_BUSY_EVERY).
 inline bool SampleDraw() {
     static thread_local uint64_t calls = 0;

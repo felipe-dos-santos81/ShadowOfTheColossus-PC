@@ -200,6 +200,7 @@ struct DrawStatsSample {
     bool sample;
 
     explicit DrawStatsSample(bool enabled) : sample(enabled && SotcStats::SampleDraw()) {
+        SotcStats::draw_sample = sample;
         if (sample) {
             SotcStats::draw_stat_cmds.fetch_add(1, std::memory_order_relaxed);
         }
@@ -231,10 +232,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_prepare_ns, draw_stats.sample};
+        PrepareRenderState(pipeline);
+    }
     bool bound;
     {
         const SotcStats::DrawPhaseTimer phase{SotcStats::draw_bind_ns, draw_stats.sample};
-        PrepareRenderState(pipeline);
         bound = BindResources(pipeline);
     }
     if (!bound) {
@@ -324,10 +328,13 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_prepare_ns, draw_stats.sample};
+        PrepareRenderState(pipeline);
+    }
     bool bound;
     {
         const SotcStats::DrawPhaseTimer phase{SotcStats::draw_bind_ns, draw_stats.sample};
-        PrepareRenderState(pipeline);
         bound = BindResources(pipeline);
     }
     if (!bound) {
@@ -702,8 +709,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         }
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
-        BindBuffers(*stage, binding, push_data);
-        BindTextures(*stage, binding);
+        {
+            const SotcStats::DrawPhaseTimer phase{SotcStats::draw_bufbind_ns,
+                                                  SotcStats::draw_sample};
+            BindBuffers(*stage, binding, push_data);
+        }
+        {
+            const SotcStats::DrawPhaseTimer phase{SotcStats::draw_texbind_ns,
+                                                  SotcStats::draw_sample};
+            BindTextures(*stage, binding);
+        }
         uses_dma |= stage->uses_dma;
     }
 

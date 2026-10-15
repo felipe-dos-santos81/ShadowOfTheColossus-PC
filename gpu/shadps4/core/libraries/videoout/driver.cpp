@@ -348,10 +348,18 @@ void VideoOutDriver::Flip(const Request& req) {
                     return samples > 0 ? double(ns.exchange(0)) / samples / 1000.0 : 0.0;
                 };
                 std::fprintf(stderr,
-                             "SOTC draw us (%.0f sampled): key %.2f, bind %.2f, state %.2f, "
-                             "emit %.2f\n",
+                             "SOTC draw us (%.0f sampled): key %.2f (stages %.2f [getprogram "
+                             "%.2f of which flatbuf %.2f], lookup %.2f), prepare %.2f, bind %.2f "
+                             "(buf %.2f, tex %.2f), state %.2f, emit %.2f\n",
                              samples, per_draw_us(SotcStats::draw_key_ns),
+                             per_draw_us(SotcStats::draw_stages_ns),
+                             per_draw_us(SotcStats::draw_getprogram_ns),
+                             per_draw_us(SotcStats::draw_flatbuf_ns),
+                             per_draw_us(SotcStats::draw_lookup_ns),
+                             per_draw_us(SotcStats::draw_prepare_ns),
                              per_draw_us(SotcStats::draw_bind_ns),
+                             per_draw_us(SotcStats::draw_bufbind_ns),
+                             per_draw_us(SotcStats::draw_texbind_ns),
                              per_draw_us(SotcStats::draw_state_ns),
                              per_draw_us(SotcStats::draw_emit_ns));
                 const double key_total = double(SotcStats::draw_key_total.exchange(0));
