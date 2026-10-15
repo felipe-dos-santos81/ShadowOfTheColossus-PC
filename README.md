@@ -13,12 +13,16 @@
 > para **Windows 10/11** e **macOS no Apple Silicon**, acrescenta **HDR** automático numa tela que
 > o anuncia (`BB_HDR`) e, no macOS, liga o **envio periódico de trabalho à GPU por padrão**: o
 > quadro deixa de serializar e o campo aberto saiu de 12–15 para 20–26 FPS (com `BB_VBLANK_HZ=90`,
-> 27–31 na maioria das janelas).
+> 27–31 na maioria das janelas). Para o estudo do ritmo em vblank alto, `SOTC_PRESENT_STATS=1`
+> imprime o que a thread de apresentação faz a cada 5 s (vblanks/s, tempo por quadro, atrasos,
+> CPU) e `SOTC_PRESENT_RT=0` a tira do escalonador de tempo real do macOS.
 > / On top of bbport's loader and launcher, this fork ports the PS4 **Shadow of the Colossus** to
 > **Windows 10/11** and **macOS on Apple Silicon**, adds automatic **HDR** on a display that
 > reports it (`BB_HDR`), and on macOS enables **periodic GPU submission by default**: frames stop
 > serialising and the open world went from 12–15 to 20–26 FPS (with `BB_VBLANK_HZ=90`, 27–31 in
-> most windows).
+> most windows). For the high-vblank pacing study, `SOTC_PRESENT_STATS=1` prints what the present
+> thread does every 5 s (vblanks/s, per-frame time, lateness, CPU) and `SOTC_PRESENT_RT=0` takes
+> it off macOS's real-time scheduler.
 
 ---
 

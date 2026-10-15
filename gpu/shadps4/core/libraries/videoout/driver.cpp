@@ -4,6 +4,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/thread_info.h>
+#endif
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -19,6 +23,42 @@
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
+
+namespace {
+// sotc: what the present thread does between frame-rate lines (SOTC_PRESENT_STATS=1 prints them
+// next to the frame rate). `catchup` counts iterations the pacing timer would not let sleep
+// because the previous ones ran late, and `min_wait` is how deep that lateness got.
+struct PresentStats {
+    u64 iterations = 0;
+    u64 presents = 0;
+    u64 present_ns = 0;
+    u64 max_present_ns = 0;
+    u64 catchup = 0;
+    s64 min_wait_ns = 0;
+    u64 cpu_ns = 0;
+};
+PresentStats present_stats;
+bool present_realtime = true;
+
+/// CPU time of the calling thread in nanoseconds (macOS); zero elsewhere.
+u64 PresentThreadCpuNs() {
+#ifdef __APPLE__
+    const thread_t thread = mach_thread_self();
+    thread_basic_info_data_t info{};
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    const kern_return_t result =
+        thread_info(thread, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &count);
+    mach_port_deallocate(mach_task_self(), thread);
+    if (result != KERN_SUCCESS) {
+        return 0;
+    }
+    return static_cast<u64>(info.user_time.seconds + info.system_time.seconds) * 1000000000ull +
+           static_cast<u64>(info.user_time.microseconds + info.system_time.microseconds) * 1000ull;
+#else
+    return 0;
+#endif
+}
+} // namespace
 
 namespace Libraries::VideoOut {
 
@@ -244,8 +284,10 @@ void VideoOutDriver::Flip(const Request& req) {
     // Present the frame.
     presenter->Present(req.frame);
 
-    // sotc: SOTC_FPS=1 prints the flip rate every five seconds.
-    static const bool fps_log = std::getenv("SOTC_FPS") != nullptr;
+    // sotc: SOTC_FPS=1 prints the flip rate every five seconds; SOTC_PRESENT_STATS=1 adds the
+    // presenter's own numbers and works on its own too.
+    static const bool fps_log = std::getenv("SOTC_FPS") != nullptr ||
+                                std::getenv("SOTC_PRESENT_STATS") != nullptr;
     if (fps_log) {
         static auto window_start = std::chrono::steady_clock::now();
         static const auto run_start = window_start;
@@ -297,6 +339,32 @@ void VideoOutDriver::Flip(const Request& req) {
                              double(SotcStats::upload_bytes.exchange(0)) / 1024.0 / flips,
                              double(SotcStats::render_breaks.exchange(0)) / flips);
             }
+            static const bool present_stats_log = std::getenv("SOTC_PRESENT_STATS") != nullptr;
+            if (present_stats_log) {
+                const auto cpu_now = PresentThreadCpuNs();
+                std::fprintf(
+                    stderr,
+                    "SOTC presenter: %.0f vblanks/s, %.1f frames/s, present %.1f avg / %.1f max "
+                    "ms (%llu), catchup %llu, min wait %.2f ms, cpu %.0f ms/s, %s\n",
+                    static_cast<double>(present_stats.iterations) / seconds,
+                    static_cast<double>(present_stats.presents) / seconds,
+                    present_stats.presents ? static_cast<double>(present_stats.present_ns) / 1e6 /
+                                                 present_stats.presents
+                                           : 0.0,
+                    static_cast<double>(present_stats.max_present_ns) / 1e6,
+                    static_cast<unsigned long long>(present_stats.presents),
+                    static_cast<unsigned long long>(present_stats.catchup),
+                    static_cast<double>(present_stats.min_wait_ns) / 1e6,
+                    static_cast<double>(cpu_now - present_stats.cpu_ns) / 1e6 / seconds,
+                    present_realtime ? "realtime" : "normal");
+                present_stats.cpu_ns = cpu_now;
+            }
+            present_stats.iterations = 0;
+            present_stats.presents = 0;
+            present_stats.present_ns = 0;
+            present_stats.max_present_ns = 0;
+            present_stats.catchup = 0;
+            present_stats.min_wait_ns = 0;
             flips = 0;
             window_start = now;
         }
@@ -403,7 +471,17 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                                                  EmulatorSettings.GetVblankFrequency());
 
     Common::SetCurrentThreadName("shadPS4:PresentThread");
-    Common::SetCurrentThreadRealtime(vblank_period);
+    // sotc: SOTC_PRESENT_RT=0 leaves the presenter on the normal scheduler instead of macOS's
+    // real-time time-constraint policy (half a vblank period of CPU). It is the A/B switch of
+    // the high-vblank slow-mode study; SOTC_PRESENT_STATS=1 prints the numbers it measures.
+    present_realtime = [] {
+        const char* v = std::getenv("SOTC_PRESENT_RT");
+        return v == nullptr || v[0] != '0';
+    }();
+    if (present_realtime) {
+        Common::SetCurrentThreadRealtime(vblank_period);
+    }
+    present_stats.cpu_ns = PresentThreadCpuNs();
 
     Common::AccurateTimer timer{vblank_period};
 
@@ -419,6 +497,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
     while (!token.stop_requested()) {
         timer.Start();
+        ++present_stats.iterations;
 
         if (DebugState.IsGuestThreadsPaused()) {
             DrawLastFrame();
@@ -439,7 +518,16 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                     }
                 }
             } else {
+                const auto present_begin = std::chrono::steady_clock::now();
                 Flip(request);
+                const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - present_begin)
+                                            .count();
+                ++present_stats.presents;
+                present_stats.present_ns += static_cast<u64>(present_ns);
+                if (static_cast<u64>(present_ns) > present_stats.max_present_ns) {
+                    present_stats.max_present_ns = static_cast<u64>(present_ns);
+                }
                 FRAME_END;
             }
         }
@@ -469,6 +557,13 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         }
 
         timer.End();
+        const auto wait = timer.GetTotalWait().count();
+        if (wait < 0) {
+            ++present_stats.catchup;
+            if (wait < present_stats.min_wait_ns) {
+                present_stats.min_wait_ns = wait;
+            }
+        }
     }
 }
 

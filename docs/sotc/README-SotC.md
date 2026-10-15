@@ -137,3 +137,5 @@ Estas variáveis de ambiente ajudam a investigar problemas:
 | `SOTC_INDIRECT_DIRECT=0` | mantém indiretos os draws cujos argumentos estão na CPU |
 | `SOTC_WAIT_MARKER=1/2` | esperas pela GPU consultam um marcador escrito por ela (experimental) |
 | `SOTC_CMD_STATS=1/2` | draws e dispatches por quadro (2: shaders de compute mais usados) |
+| `SOTC_PRESENT_STATS=1` | o que a thread de apresentação faz a cada 5 s: vblanks/s, tempo por quadro, atrasos de ritmo e CPU |
+| `SOTC_PRESENT_RT=0` | deixa a thread de apresentação fora do escalonador de tempo real do macOS |
