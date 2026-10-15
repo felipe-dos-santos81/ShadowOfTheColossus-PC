@@ -283,6 +283,14 @@ struct PassInfo {
     // Bumped during codegen to assign offsets to readconsts
     u16 dst_off_dw;
 
+    // sotc: run-time offset expressions (loop or Phi indices) the walker cannot compute and
+    // serves by copying a window of the table, and reads whose offset could not be resolved at
+    // all (those are dropped and keep whatever their flattened slot had). Reported once per
+    // walker in GenerateSrtProgram.
+    u32 unresolved_offsets = 0;
+    u32 dynamic_windows = 0;
+    u32 dropped_reads = 0;
+
     // Walker loads test the clean-page bitmap (SrtWalkerContext in r13)
     bool clean_loads = false;
     Xbyak::Label clean_load_stub;
@@ -689,8 +697,10 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
         ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
         return true;
     default:
-        LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
-                  magic_enum::enum_name(inst->GetOpcode()));
+        // Likely cause: the index is only known while the shader runs (a loop counter: a Phi).
+        // The caller serves those reads with a window copy of the table; the totals are reported
+        // once per walker in GenerateSrtProgram.
+        ++pass_info.unresolved_offsets;
         return false;
     }
 }
@@ -835,7 +845,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     }
 
     if (!PushPtr(c, pass_info, off_dw)) {
-        LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+        ++pass_info.dropped_reads;
         return;
     }
     PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
@@ -853,7 +863,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         } else {
             if (!ComputeOffset(c, r10d, pass_info, src_off_dw)) {
                 if (use->GetOpcode() != IR::Opcode::ReadConst) {
-                    LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+                    ++pass_info.dropped_reads;
                     continue;
                 }
                 // The index is only known while the shader runs (e.g. a loop counter): copy a
@@ -862,6 +872,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
                     dynamic_window = pass_info.dst_off_dw;
                     EmitCopyWindow(c, pass_info.dst_off_dw);
                     pass_info.dst_off_dw += ReadConstDynamicWindowDwords;
+                    ++pass_info.dynamic_windows;
                 }
                 use->SetFlags(*dynamic_window | ReadConstDynamicWindowFlag);
                 continue;
@@ -932,6 +943,21 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     }
 
     info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
+
+    // sotc: one line per compiled walker instead of one error per read, and the window copies are
+    // reported with the volume they copy per invocation: a walker that copies hundreds of KB is
+    // what makes the draws using it slow.
+    if (pass_info.unresolved_offsets != 0) {
+        LOG_WARNING(Render_Recompiler,
+                    "SRT walker {:#x}: {} run-time indexed reads in {} window copies ({} KB per "
+                    "invocation)",
+                    info.pgm_hash, pass_info.unresolved_offsets, pass_info.dynamic_windows,
+                    (u64{pass_info.dynamic_windows} * ReadConstDynamicWindowDwords * 4) / 1024);
+    }
+    if (pass_info.dropped_reads != 0) {
+        LOG_ERROR(Render_Recompiler, "SRT walker {:#x}: {} SRT reads dropped (offset not computable)",
+                  info.pgm_hash, pass_info.dropped_reads);
+    }
 }
 
 static bool IsReadConstSource(const IR::Value base) {

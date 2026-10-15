@@ -208,6 +208,33 @@ bool WindowSDL::PollEvents() {
             height = h;
             break;
         }
+        // sotc: a hidden, occluded or unfocused window is what macOS throttles (App Nap) while
+        // the port plays silent; the game then stalls on its flip and sync-event waits. Logged so
+        // a captured session shows whether the window went to the background when it did.
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            LOG_INFO(Frontend, "Window: focus gained");
+            break;
+        case SDL_EVENT_WINDOW_EXPOSED:
+            LOG_INFO(Frontend, "Window: exposed (visible again)");
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            LOG_INFO(Frontend, "Window: focus lost");
+            break;
+        case SDL_EVENT_WINDOW_OCCLUDED:
+            LOG_INFO(Frontend, "Window: occluded (covered)");
+            break;
+        case SDL_EVENT_WINDOW_MINIMIZED:
+            LOG_INFO(Frontend, "Window: minimized");
+            break;
+        case SDL_EVENT_WINDOW_RESTORED:
+            LOG_INFO(Frontend, "Window: restored");
+            break;
+        case SDL_EVENT_WINDOW_HIDDEN:
+            LOG_INFO(Frontend, "Window: hidden");
+            break;
+        case SDL_EVENT_WINDOW_SHOWN:
+            LOG_INFO(Frontend, "Window: shown");
+            break;
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
             is_open = false;

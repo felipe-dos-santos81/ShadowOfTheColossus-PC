@@ -172,3 +172,22 @@ arquitetura; o que rendeu de verdade e está ligado por padrão: envio periódic
 assíncronas (a thread de comandos não espera mais a GPU: ~0,5–0,65 s/s de espera a menos),
 memorando do `FindImage`, desproteção adiantada das páginas de escrita, leituras "quentes" e
 argumentos de indiretos lidos na CPU.
+
+### Achados de uma sessão real de jogo
+
+Duas pistas de uma sessão no modo 60 FPS:
+
+- **Índices de SRT em tempo de execução** (`ComputeOffset: ... Phi` em massa antigamente): shaders
+  que indexam as tabelas SRT num laço não têm o deslocamento calculado pelo walker; o port copia
+  uma **janela** da tabela e o shader indexa dentro dela. Não é falha: os dois shaders que
+  disparavam as 178 linhas resolvem-se em **1 janela de 2 KB por invocação** cada. Agora sai
+  **uma** linha por shader compilado: `SRT walker <hash>: N leituras indexadas em tempo de
+  execução em M janelas (K KB por invocação)` — K alto explica draws caros daquele shader.
+  Leituras realmente descartadas saem à parte, em nível de erro.
+- **Trava rara** (`PS4SyncEvent waited 5–15s` + `flip event queue waited 5s`, cena leve a 9 FPS;
+  reproduzida uma vez numa corrida de teste, com a janela em primeiro plano e **sem** eventos de
+  janela): os **dois** eventos inscritos na fila (flip e vblank) ficaram 5 s sem disparar, ou seja
+  o laço de vblank da thread de apresentação congelou por segundos. A janela agora regista
+  `Window: focus lost/occluded/minimized` (e o regresso) para descartar o segundo plano, e
+  `SOTC_PRESENT_STATS=1` mostra o pior tempo de `present`. Se travar de novo, capture com
+  `SOTC_FPS=1 SOTC_PRESENT_STATS=1 SOTC_THREAD_STATS=1`.
