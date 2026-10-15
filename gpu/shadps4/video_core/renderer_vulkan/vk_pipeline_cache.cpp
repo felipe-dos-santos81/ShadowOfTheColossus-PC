@@ -23,6 +23,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/sotc_stats.h"
 
 namespace Vulkan {
 
@@ -364,6 +365,18 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     draw_indirect_params = params;
     if (!RefreshGraphicsKey()) {
         return nullptr;
+    }
+    // SOTC_DRAW_STATS=1: how often a draw repeats the previous draw's pipeline key -- the
+    // optimistic bound for reusing the previous draw's pipeline and bindings.
+    if (SotcStats::DrawStatsEnabled()) {
+        static thread_local GraphicsPipelineKey last_key;
+        static thread_local bool have_last = false;
+        if (have_last && std::memcmp(&graphics_key, &last_key, sizeof(graphics_key)) == 0) {
+            SotcStats::draw_key_repeats.fetch_add(1, std::memory_order_relaxed);
+        }
+        last_key = graphics_key;
+        have_last = true;
+        SotcStats::draw_key_total.fetch_add(1, std::memory_order_relaxed);
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {

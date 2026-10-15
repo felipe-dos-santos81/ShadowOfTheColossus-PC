@@ -194,6 +194,19 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
+namespace {
+/// SOTC_DRAW_STATS=1: samples 1 in SOTC_BUSY_EVERY draws and counts them for the phase print.
+struct DrawStatsSample {
+    bool sample;
+
+    explicit DrawStatsSample(bool enabled) : sample(enabled && SotcStats::SampleDraw()) {
+        if (sample) {
+            SotcStats::draw_stat_cmds.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+};
+} // namespace
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
     const SotcStats::CpCommandTimer cmd_timer;
@@ -205,7 +218,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const DrawStatsSample draw_stats{SotcStats::DrawStatsEnabled()};
+    const GraphicsPipeline* pipeline;
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_key_ns, draw_stats.sample};
+        pipeline = pipeline_cache.GetGraphicsPipeline();
+    }
     SotcStats::current_program.store(1, std::memory_order_relaxed);
     SotcStats::cmd_kinds[0].fetch_add(1, std::memory_order_relaxed);
     if (!pipeline) {
@@ -213,39 +231,50 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    bool bound;
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_bind_ns, draw_stats.sample};
+        PrepareRenderState(pipeline);
+        bound = BindResources(pipeline);
+    }
+    if (!bound) {
         SotcStats::Drop(1, regs.color_buffers[0].Address(), 0);
         return;
     }
     const auto state = BeginRendering(pipeline);
 
-    BindVertexBuffers(pipeline);
-    if (is_indexed) {
-        BindIndexBuffer(index_offset);
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_state_ns, draw_stats.sample};
+        BindVertexBuffers(pipeline);
+        if (is_indexed) {
+            BindIndexBuffer(index_offset);
+        }
+
+        if (needs_barrier) {
+            runtime.FlushBarriers();
+        }
+
+        pipeline->BindResources(set_writes, push_data);
+        UpdateDynamicState(pipeline, is_indexed);
+        scheduler.BeginRendering(state);
     }
 
-    if (needs_barrier) {
-        runtime.FlushBarriers();
-    }
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_emit_ns, draw_stats.sample};
+        const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+        const auto& fetch_shader = pipeline->GetFetchShader();
+        const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
-    pipeline->BindResources(set_writes, push_data);
-    UpdateDynamicState(pipeline, is_indexed);
-    scheduler.BeginRendering(state);
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
-    const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
-    const auto& fetch_shader = pipeline->GetFetchShader();
-    const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
-
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
-
-    if (is_indexed) {
-        cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
-                           s32(vertex_offset), instance_offset);
-    } else {
-        cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
-                    instance_offset);
+        if (is_indexed) {
+            cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
+                               s32(vertex_offset), instance_offset);
+        } else {
+            cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
+                        instance_offset);
+        }
     }
     DebugState.IncDrawCall();
 
@@ -265,6 +294,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    const DrawStatsSample draw_stats{SotcStats::DrawStatsEnabled()};
     static const bool cmd_stats = std::getenv("SOTC_CMD_STATS") != nullptr;
     if (cmd_stats) {
         const u64 args_size = u64{stride} * max_count;
@@ -284,14 +314,23 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         .vertex_sgpr_offset = vertex_sgpr_offset,
         .instance_sgpr_offset = instance_sgpr_offset,
     };
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
+    const GraphicsPipeline* pipeline;
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_key_ns, draw_stats.sample};
+        pipeline = pipeline_cache.GetGraphicsPipeline(params);
+    }
     if (!pipeline) {
         SotcStats::Drop(0, liverpool->regs.color_buffers[0].Address(), 1);
         return;
     }
 
-    PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    bool bound;
+    {
+        const SotcStats::DrawPhaseTimer phase{SotcStats::draw_bind_ns, draw_stats.sample};
+        PrepareRenderState(pipeline);
+        bound = BindResources(pipeline);
+    }
+    if (!bound) {
         SotcStats::Drop(1, liverpool->regs.color_buffers[0].Address(), 1);
         return;
     }
@@ -321,21 +360,27 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               : sizeof(VkDrawIndirectCommand)) &&
         !buffer_cache.IsRegionGpuModified(arg_address + offset, stride) &&
         memory->TryReadBacking(arg_address + offset, &args, stride)) {
-        if (needs_barrier) {
-            runtime.FlushBarriers();
+        {
+            const SotcStats::DrawPhaseTimer phase{SotcStats::draw_state_ns, draw_stats.sample};
+            if (needs_barrier) {
+                runtime.FlushBarriers();
+            }
+            pipeline->BindResources(set_writes, push_data);
+            UpdateDynamicState(pipeline, is_indexed);
+            scheduler.BeginRendering(state);
         }
-        pipeline->BindResources(set_writes, push_data);
-        UpdateDynamicState(pipeline, is_indexed);
-        scheduler.BeginRendering(state);
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
-        if (is_indexed) {
-            const auto& a = args.indexed;
-            cmdbuf.drawIndexed(a.indexCount, a.instanceCount, a.firstIndex, a.vertexOffset,
-                               a.firstInstance);
-        } else {
-            const auto& a = args.plain;
-            cmdbuf.draw(a.vertexCount, a.instanceCount, a.firstVertex, a.firstInstance);
+        {
+            const SotcStats::DrawPhaseTimer phase{SotcStats::draw_emit_ns, draw_stats.sample};
+            const auto cmdbuf = scheduler.CommandBuffer();
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+            if (is_indexed) {
+                const auto& a = args.indexed;
+                cmdbuf.drawIndexed(a.indexCount, a.instanceCount, a.firstIndex, a.vertexOffset,
+                                   a.firstInstance);
+            } else {
+                const auto& a = args.plain;
+                cmdbuf.draw(a.vertexCount, a.instanceCount, a.firstVertex, a.firstInstance);
+            }
         }
         DebugState.IncDrawCall();
         ResetBindings(false);

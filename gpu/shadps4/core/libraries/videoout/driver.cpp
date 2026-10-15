@@ -341,6 +341,24 @@ void VideoOutDriver::Flip(const Request& req) {
                              double(SotcStats::upload_bytes.exchange(0)) / 1024.0 / flips,
                              double(SotcStats::render_breaks.exchange(0)) / flips);
             }
+            static const bool draw_stats_log = SotcStats::DrawStatsEnabled();
+            if (draw_stats_log) {
+                const double samples = double(SotcStats::draw_stat_cmds.exchange(0));
+                const auto per_draw_us = [samples](std::atomic<uint64_t>& ns) {
+                    return samples > 0 ? double(ns.exchange(0)) / samples / 1000.0 : 0.0;
+                };
+                std::fprintf(stderr,
+                             "SOTC draw us (%.0f sampled): key %.2f, bind %.2f, state %.2f, "
+                             "emit %.2f\n",
+                             samples, per_draw_us(SotcStats::draw_key_ns),
+                             per_draw_us(SotcStats::draw_bind_ns),
+                             per_draw_us(SotcStats::draw_state_ns),
+                             per_draw_us(SotcStats::draw_emit_ns));
+                const double key_total = double(SotcStats::draw_key_total.exchange(0));
+                const double key_repeats = double(SotcStats::draw_key_repeats.exchange(0));
+                std::fprintf(stderr, "SOTC draw key repeats: %.1f%% of %.0f draws\n",
+                             key_total > 0 ? 100.0 * key_repeats / key_total : 0.0, key_total);
+            }
             static const bool present_stats_log = std::getenv("SOTC_PRESENT_STATS") != nullptr;
             if (present_stats_log) {
                 const auto cpu_now = PresentThreadCpuNs();

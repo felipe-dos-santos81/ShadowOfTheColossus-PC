@@ -98,6 +98,54 @@ struct CpCommandTimer {
     }
 };
 
+/// SOTC_DRAW_STATS=1: the sampled draw's own breakdown, per sampled draw, every five seconds
+/// (key: pipeline key refresh and lookup; bind: render state and descriptor preparation; state:
+/// vertex buffers, resource binds and dynamic state; emit: the draw call itself). The sample is
+/// 1 in SOTC_BUSY_EVERY.
+inline std::atomic<uint64_t> draw_key_ns{0};
+inline std::atomic<uint64_t> draw_bind_ns{0};
+inline std::atomic<uint64_t> draw_state_ns{0};
+inline std::atomic<uint64_t> draw_emit_ns{0};
+inline std::atomic<uint64_t> draw_stat_cmds{0};
+
+inline bool DrawStatsEnabled() {
+    static const bool value = std::getenv("SOTC_DRAW_STATS") != nullptr;
+    return value;
+}
+
+/// SOTC_DRAW_STATS=1: how often a graphics draw repeats the previous draw's pipeline key. That is
+/// the optimistic bound for a fast path that reuses the previous draw's pipeline and bindings.
+inline std::atomic<uint64_t> draw_key_total{0};
+inline std::atomic<uint64_t> draw_key_repeats{0};
+
+/// True for the draws that SOTC_DRAW_STATS samples (1 in SOTC_BUSY_EVERY).
+inline bool SampleDraw() {
+    static thread_local uint64_t calls = 0;
+    return (++calls % BusySampleEvery()) == 0;
+}
+
+/// Times one draw phase between construction and destruction; inert when not sampled.
+struct DrawPhaseTimer {
+    std::chrono::steady_clock::time_point start;
+    std::atomic<uint64_t>* counter{};
+
+    DrawPhaseTimer(std::atomic<uint64_t>& c, bool active) : counter(active ? &c : nullptr) {
+        if (counter) {
+            start = std::chrono::steady_clock::now();
+        }
+    }
+    ~DrawPhaseTimer() {
+        if (!counter) {
+            return;
+        }
+        counter->fetch_add(
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - start)
+                                      .count()),
+            std::memory_order_relaxed);
+    }
+};
+
 /// SOTC_DROP_TRACE=1: logs the first 80 draws/dispatches of each kind that are dropped.
 inline void Drop(int kind, unsigned long long a, unsigned long long b) {
     static const bool enabled = [] {
