@@ -174,13 +174,16 @@ struct Info : InfoPersistent {
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data(), &SrtCopyWindow,
-                                 GetSrtWalkerContext());
+            RunSrtWalker();
         }
         if (!sharp_tables.empty()) {
             RefreshSharpTables();
         }
     }
+
+    /// Runs the generated SRT walker over the user data (out of line so SOTC_DRAW_STATS can time
+    /// it without pulling the stats header into this one).
+    void RunSrtWalker();
 
     /// Copies every SharpTable from guest memory into the flat buffer (zeros if unmapped)
     void RefreshSharpTables();

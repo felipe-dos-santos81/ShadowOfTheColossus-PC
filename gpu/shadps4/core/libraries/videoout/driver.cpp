@@ -366,6 +366,9 @@ void VideoOutDriver::Flip(const Request& req) {
                 const double key_repeats = double(SotcStats::draw_key_repeats.exchange(0));
                 std::fprintf(stderr, "SOTC draw key repeats: %.1f%% of %.0f draws\n",
                              key_total > 0 ? 100.0 * key_repeats / key_total : 0.0, key_total);
+                std::fprintf(stderr, "SOTC draw flatbuf us: srt-walker %.2f, tsharp %.2f\n",
+                             per_draw_us(SotcStats::draw_flatbuf_walker_ns),
+                             per_draw_us(SotcStats::draw_flatbuf_tsharp_ns));
             }
             static const bool present_stats_log = std::getenv("SOTC_PRESENT_STATS") != nullptr;
             if (present_stats_log) {

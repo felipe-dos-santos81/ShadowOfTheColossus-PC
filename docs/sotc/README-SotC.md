@@ -142,3 +142,33 @@ Estas variáveis de ambiente ajudam a investigar problemas:
 | `SOTC_THREAD_STATS=1` | tempo por thread de renderização a cada 5 s: gravação, execução dos comandos, esperas, submits |
 | `SOTC_DRAW_STATS=1` | raio-X dos draws a cada 5 s: fases da chave do pipeline (estágios, flatbuf), preparação, bindings de buffer/textura, estado dinâmico, emissão (amostra 1 em 16) |
 | `SOTC_RB_ASYNC=0` | leituras da GPU síncronas (padrão: assíncronas no SotC com o KosmicKrisp; `=1` força em qualquer placa/jogo) |
+
+### Onde o tempo vai (medido)
+
+O quadro, medido no macOS com o KosmicKrisp (`SOTC_THREAD_STATS=1`, `SOTC_DRAW_STATS=1`,
+`SOTC_CMD_STATS=1`): a GPU **não** é o muro (fica ~48% do tempo ociosa, ~18 ms de trabalho por
+quadro de ~33 ms); o muro é a CPU: a thread de comandos grava cada draw/dispatch em ~5,3 µs
+(~2,2 mil draws por quadro no campo aberto).
+
+O raio-X de um draw (µs, amostrado 1 em 16, campo aberto):
+
+| Parte | µs | Dá para pular? |
+|---|---|---|
+| Percorredor do SRT: relê as tabelas de descritores do jogo na memória do convidado | 0,7–0,9 | não: o motor reescreve as tabelas a cada draw |
+| Bindings de buffer (`ObtainBuffer`, cercas de escrita) | 1,2–1,4 | não: o estado vem da memória do convidado |
+| Bindings de textura (`FindImage`, amostras, transições de layout) | 0,9–1,1 | não: idem, e as gerações do cache mudam |
+| Preenchimento da chave do pipeline | ~0,3 | em parte, mas pouco |
+| Estado de renderização (alvos, carga de RT) | 0,26 | em parte |
+| Estado dinâmico (viewport, recorte, profundidade, mistura) | 0,5 | ~0,3 com um guarda de dezenas de campos |
+| Busca do pipeline no mapa (74–80% das vezes a chave repete) | 0,10 | sim, mas o ganho é invisível |
+| Emissão do draw | 0,05 | — |
+
+Tentado e recusado: **reusar o draw anterior quando os registradores repetem**. 72–80% dos draws
+repetem a chave do pipeline, mas registradores iguais **não** significam descritores iguais — as
+tabelas de descritores (SRT, sharp, T# dinâmicos) vivem na memória do convidado e são reescritas
+entre draws — e as únicas partes puláveis somam ~0,3–0,4 µs (~7%) com um guarda de dezenas de
+campos onde um esquecido significa estado de GPU errado. O caminho de draw está no piso desta
+arquitetura; o que rendeu de verdade e está ligado por padrão: envio periódico à GPU, leituras
+assíncronas (a thread de comandos não espera mais a GPU: ~0,5–0,65 s/s de espera a menos),
+memorando do `FindImage`, desproteção adiantada das páginas de escrita, leituras "quentes" e
+argumentos de indiretos lidos na CPU.

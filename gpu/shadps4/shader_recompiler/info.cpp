@@ -10,10 +10,20 @@
 #include "common/elf_info.h"
 #include "core/memory.h"
 #include "shader_recompiler/info.h"
+#include "video_core/sotc_stats.h"
 
 namespace Shader {
 
+void Info::RunSrtWalker() {
+    const SotcStats::DrawPhaseTimer phase{SotcStats::draw_flatbuf_walker_ns,
+                                          SotcStats::draw_sample};
+    srt_info.walker_func(user_data.data(), flattened_ud_buf.data(), &SrtCopyWindow,
+                         GetSrtWalkerContext());
+}
+
 void Info::RefreshSharpTables() {
+    const SotcStats::DrawPhaseTimer phase{SotcStats::draw_flatbuf_tsharp_ns,
+                                          SotcStats::draw_sample};
     constexpr VAddr AddressMask = 0xFFFFFFFFFFFFULL;
     auto* memory = Core::Memory::Instance();
     for (const SharpTable& table : sharp_tables) {

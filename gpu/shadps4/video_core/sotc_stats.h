@@ -132,6 +132,11 @@ inline std::atomic<uint64_t> draw_texbind_ns{0};
 inline std::atomic<uint64_t> draw_getprogram_ns{0};
 inline std::atomic<uint64_t> draw_flatbuf_ns{0};
 
+/// Parts of the flat-buffer refresh: the generated SRT walker and the dynamic T# tables read from
+/// guest memory.
+inline std::atomic<uint64_t> draw_flatbuf_walker_ns{0};
+inline std::atomic<uint64_t> draw_flatbuf_tsharp_ns{0};
+
 /// True for the draws that SOTC_DRAW_STATS samples (1 in SOTC_BUSY_EVERY).
 inline bool SampleDraw() {
     static thread_local uint64_t calls = 0;
