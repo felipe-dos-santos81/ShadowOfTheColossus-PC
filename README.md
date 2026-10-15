@@ -8,6 +8,18 @@
 > game dump and, for sound, two modules from your own console. This project is not affiliated with
 > Sony Interactive Entertainment or Bluepoint Games.
 
+> ### Este fork / This fork
+> Sobre o carregador e o lançador do bbport, este fork porta o **Shadow of the Colossus** de PS4
+> para **Windows 10/11** e **macOS no Apple Silicon**, acrescenta **HDR** automático numa tela que
+> o anuncia (`BB_HDR`) e, no macOS, liga o **envio periódico de trabalho à GPU por padrão**: o
+> quadro deixa de serializar e o campo aberto saiu de 12–15 para 20–26 FPS (com `BB_VBLANK_HZ=90`,
+> 27–31 na maioria das janelas).
+> / On top of bbport's loader and launcher, this fork ports the PS4 **Shadow of the Colossus** to
+> **Windows 10/11** and **macOS on Apple Silicon**, adds automatic **HDR** on a display that
+> reports it (`BB_HDR`), and on macOS enables **periodic GPU submission by default**: frames stop
+> serialising and the open world went from 12–15 to 20–26 FPS (with `BB_VBLANK_HZ=90`, 27–31 in
+> most windows).
+
 ---
 
 ## Português
@@ -94,10 +106,10 @@ Versões anteriores no [CHANGELOG](CHANGELOG.md).
 ### Perguntas comuns
 
 - **DirectX 11/12?** Não. O núcleo de vídeo traduz a GPU do PS4 para Vulkan, com shaders em SPIR-V.
-- **AMD e Intel?** Quase todas as otimizações valem para qualquer placa. Duas ligam sozinhas só na
-  NVIDIA (envio periódico à GPU e leituras antecipadas); em **Imagem e FPS > Envio de trabalho à
-  GPU**, escolha **Ligado** para usá-las numa AMD ou Intel. Se a tela ficar preta, volte para
-  **Automático**.
+- **AMD e Intel?** Quase todas as otimizações valem para qualquer placa. As leituras antecipadas
+  ligam sozinhas só na NVIDIA; o envio periódico à GPU liga sozinho na NVIDIA e no macOS (driver
+  KosmicKrisp). Em **Imagem e FPS > Envio de trabalho à GPU**, escolha **Ligado** para usá-las numa
+  AMD ou Intel. Se a tela ficar preta, volte para **Automático**.
 - **Por que não vem o som pronto?** Os dois `.sprx` são firmware da Sony; distribuí-los não é
   permitido.
 - **O jogo fechou sozinho.** Abra uma *issue* com o arquivo `user/last_run.log`.
@@ -186,10 +198,10 @@ Earlier versions are in the [CHANGELOG](CHANGELOG.md) (in Portuguese).
 ### Common questions
 
 - **DirectX 11/12?** No. The video core translates the PS4 GPU to Vulkan, with SPIR-V shaders.
-- **AMD and Intel?** Almost every optimization works on any card. Two enable themselves on NVIDIA
-  only (periodic GPU submission and readbacks ahead); under **Image and FPS > GPU work
-  submission**, choose **On** to use them on AMD or Intel. If the screen goes black, go back to
-  **Automatic**.
+- **AMD and Intel?** Almost every optimization works on any card. Readbacks ahead enable themselves
+  on NVIDIA only; periodic GPU submission enables itself on NVIDIA and on macOS (the KosmicKrisp
+  driver). Under **Image and FPS > GPU work submission**, choose **On** to use them on AMD or
+  Intel. If the screen goes black, go back to **Automatic**.
 - **Why no ready-made sound?** The two `.sprx` files are Sony firmware, and shipping them is not
   allowed.
 - **The game closed by itself?** Open an issue with `user/last_run.log`.
