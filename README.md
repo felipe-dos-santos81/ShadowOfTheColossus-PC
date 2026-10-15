@@ -11,22 +11,23 @@
 > ### Este fork / This fork
 > Sobre o carregador e o lançador do bbport, este fork porta o **Shadow of the Colossus** de PS4
 > para **Windows 10/11** e **macOS no Apple Silicon**, acrescenta **HDR** automático numa tela que
-> o anuncia (`BB_HDR`) e, no macOS, liga o **envio periódico de trabalho à GPU por padrão**: o
-> quadro deixa de serializar e o campo aberto saiu de 12–15 para 20–26 FPS no padrão de 60 Hz.
-> As **leituras da GPU assíncronas** (`SOTC_RB_ASYNC=1`, experimental) chegam a 34–44 FPS com
-> `BB_VBLANK_HZ=120` nas medições mais recentes; uma asserção rara na proteção de páginas ainda
-> está em investigação e elas ficam desligadas por padrão. Para o estudo do ritmo em vblank alto,
-> `SOTC_PRESENT_STATS=1` imprime o que a thread de apresentação faz a cada 5 s (vblanks/s, tempo
-> por quadro, atrasos, CPU) e `SOTC_PRESENT_RT=0` a tira do escalonador de tempo real do macOS.
+> o anuncia (`BB_HDR`) e, no macOS, desliga a serialização do quadro: o **envio periódico de
+> trabalho à GPU** e as **leituras da GPU assíncronas** — a espera da GPU sai da thread de comandos
+> (`SOTC_RB_ASYNC=0` devolve a antiga) — ligam por padrão. O campo aberto saiu de 12–15 para
+> 20–26 FPS no padrão de 60 Hz (chegando ao teto de 30 FPS do jogo em medições limpas) e até
+> 34–44 FPS com `BB_VBLANK_HZ=120` nas medições mais recentes.
+> Para o estudo do ritmo em vblank alto, `SOTC_PRESENT_STATS=1` imprime o que a thread de
+> apresentação faz a cada 5 s (vblanks/s, tempo por quadro, atrasos, CPU) e `SOTC_PRESENT_RT=0` a
+> tira do escalonador de tempo real do macOS.
 > / On top of bbport's loader and launcher, this fork ports the PS4 **Shadow of the Colossus** to
 > **Windows 10/11** and **macOS on Apple Silicon**, adds automatic **HDR** on a display that
-> reports it (`BB_HDR`), and on macOS enables **periodic GPU submission by default**: frames stop
-> serialising and the open world went from 12–15 to 20–26 FPS at the 60 Hz default. The
-> **asynchronous GPU readbacks** (`SOTC_RB_ASYNC=1`, experimental) reach 34–44 FPS with
-> `BB_VBLANK_HZ=120` in the latest measurements; a rare page-protection assertion is still under
-> investigation and they stay off by default. For the high-vblank pacing study,
-> `SOTC_PRESENT_STATS=1` prints what the present thread does every 5 s (vblanks/s, per-frame time,
-> lateness, CPU) and `SOTC_PRESENT_RT=0` takes it off macOS's real-time scheduler.
+> reports it (`BB_HDR`), and on macOS stops the frame from serialising: **periodic GPU submission**
+> and **asynchronous GPU readbacks** (the GPU wait leaves the command thread; `SOTC_RB_ASYNC=0`
+> restores it) are on by default. The open world went from 12–15 to 20–26 FPS at the 60 Hz default
+> (reaching the game's 30 FPS cap in clean measurements) and up to 34–44 FPS with
+> `BB_VBLANK_HZ=120` in the latest measurements. For the high-vblank
+> pacing study, `SOTC_PRESENT_STATS=1` prints what the present thread does every 5 s (vblanks/s,
+> per-frame time, lateness, CPU) and `SOTC_PRESENT_RT=0` takes it off macOS's real-time scheduler.
 
 ---
 

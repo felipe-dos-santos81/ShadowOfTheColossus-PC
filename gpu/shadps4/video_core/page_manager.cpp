@@ -576,8 +576,21 @@ struct SignalImpl : public PageManager::Impl {
         RENDERER_TRACE;
         auto* memory = Core::Memory::Instance();
         auto& impl = memory->GetAddressSpace();
-        ASSERT_MSG(perms != Core::MemoryPermission::Write,
-                   "Attempted to protect region as write-only which is not a valid permission");
+        // The tracker can want a write-only page for a moment: the page holds GPU data that is
+        // not down yet, so the guest must not read it, but it may still write it. Neither this
+        // signal implementation nor macOS can protect a page as write-only, so protect it fully
+        // and let writes fault too: they take the normal write-fault path (InvalidateMemory
+        // downloads the GPU data before the guest writes over it). The asynchronous readbacks
+        // make the state reachable: the GPU and CPU bits of a page can overlap while a readback
+        // of it is in flight.
+        if (perms == Core::MemoryPermission::Write) {
+            static std::atomic<u32> reported{0};
+            if (reported++ < 8) {
+                LOG_WARNING(Render, "Write-only protection for {:#x}+{:#x} served fully protected",
+                            address, size);
+            }
+            perms = Core::MemoryPermission::None;
+        }
         // sotc: the walker's clean-load bitmap follows the read protection: set before
         // protecting, cleared after unprotecting (a stale bit only costs a clean load).
         const bool read_protected = False(perms & Core::MemoryPermission::Read);

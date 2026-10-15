@@ -140,4 +140,4 @@ Estas variáveis de ambiente ajudam a investigar problemas:
 | `SOTC_PRESENT_STATS=1` | o que a thread de apresentação faz a cada 5 s: vblanks/s, tempo por quadro, atrasos de ritmo e CPU |
 | `SOTC_PRESENT_RT=0` | deixa a thread de apresentação fora do escalonador de tempo real do macOS |
 | `SOTC_THREAD_STATS=1` | tempo por thread de renderização a cada 5 s: gravação, execução dos comandos, esperas, submits |
-| `SOTC_RB_ASYNC=1` | leituras da GPU assíncronas (experimental: +10–18% a 120 Hz; uma asserção rara na proteção de páginas está em investigação) |
+| `SOTC_RB_ASYNC=0` | leituras da GPU síncronas (padrão: assíncronas no SotC com o KosmicKrisp; `=1` força em qualquer placa/jogo) |
