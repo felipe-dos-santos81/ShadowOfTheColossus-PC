@@ -16,6 +16,7 @@
 #include "common/perf_stats.h"
 #include "common/thread.h"
 #include "video_core/renderer_vulkan/vk_recorder.h"
+#include "video_core/sotc_stats.h"
 
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
@@ -769,9 +770,16 @@ void CommandRecorder::NextChunk() {
 }
 
 CommandRecorder::Chunk* CommandRecorder::AcquireChunk() {
+    bool waited = false;
     while (chunks_in_flight.load(std::memory_order_acquire) >= MaxChunksInFlight) {
         // The recording thread is far enough behind to fill the queue, so let it catch up before
         // the producer adds more commands
+        if (!waited) {
+            waited = true;
+            if (SotcStats::ThreadStatsEnabled()) {
+                SotcStats::recorder_backpressure.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         Kick();
         std::this_thread::yield();
     }
@@ -858,20 +866,30 @@ void CommandRecorder::ConsumerLoop(std::stop_token stoken) {
     Chunk* chunk = first_chunk;
     Chunk* previous = nullptr;
     u32 pos = 0;
+    const bool thread_stats = SotcStats::ThreadStatsEnabled();
     while (true) {
         u32 committed = chunk->committed.load(std::memory_order_acquire);
         if (pos == committed) {
             // When there is no work, spin briefly before sleeping until the producer kicks the
             // queue or the short timeout expires
+            const auto spin_begin = thread_stats ? Clock::now() : Clock::time_point{};
             const auto spin_end = Clock::now() + SpinTime;
             while ((committed = chunk->committed.load(std::memory_order_acquire)) == pos &&
                    Clock::now() < spin_end && !stoken.stop_requested()) {
                 RECORDER_PAUSE();
             }
+            if (thread_stats) {
+                SotcStats::replay_spin_ns.fetch_add(
+                    static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         Clock::now() - spin_begin)
+                                         .count()),
+                    std::memory_order_relaxed);
+            }
             if (committed == pos) {
                 if (stoken.stop_requested()) {
                     break;
                 }
+                const auto sleep_begin = thread_stats ? Clock::now() : Clock::time_point{};
                 consumer_sleeping.store(true, std::memory_order_relaxed);
                 std::atomic_thread_fence(std::memory_order_seq_cst);
                 if (chunk->committed.load(std::memory_order_acquire) == pos) {
@@ -881,11 +899,20 @@ void CommandRecorder::ConsumerLoop(std::stop_token stoken) {
                     wake_flag = false;
                 }
                 consumer_sleeping.store(false, std::memory_order_relaxed);
+                if (thread_stats) {
+                    SotcStats::replay_sleep_ns.fetch_add(
+                        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             Clock::now() - sleep_begin)
+                                             .count()),
+                        std::memory_order_relaxed);
+                }
                 continue;
             }
         }
         const bool perf = Common::PerfStats::Enabled();
-        const auto busy_start = perf ? Clock::now() : Clock::time_point{};
+        const bool busy_timing = perf || thread_stats;
+        const auto busy_start = busy_timing ? Clock::now() : Clock::time_point{};
+        u64 batch_commands = 0;
         while (pos < committed) {
             auto* header = reinterpret_cast<BlockHeader*>(chunk->data + pos);
             if (header->kind == BlockKind::End) {
@@ -903,6 +930,7 @@ void CommandRecorder::ConsumerLoop(std::stop_token stoken) {
             }
             if (header->kind == BlockKind::Command) {
                 header->invoke(header + 1);
+                ++batch_commands;
             }
             pos += header->size;
         }
@@ -911,6 +939,14 @@ void CommandRecorder::ConsumerLoop(std::stop_token stoken) {
                 Common::PerfStats::Id::RecorderBusyNs,
                 std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - busy_start)
                     .count());
+        }
+        if (thread_stats) {
+            SotcStats::replay_busy_ns.fetch_add(
+                static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     Clock::now() - busy_start)
+                                     .count()),
+                std::memory_order_relaxed);
+            SotcStats::replay_cmds.fetch_add(batch_commands, std::memory_order_relaxed);
         }
     }
 }

@@ -375,6 +375,12 @@ static void QueueSubmit(const Instance& instance, const SubmitInfo& info,
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    static const bool thread_stats = SotcStats::ThreadStatsEnabled();
+    const auto submit_begin =
+        thread_stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (thread_stats) {
+        SotcStats::flushes.fetch_add(1, std::memory_order_relaxed);
+    }
     // Only the queue operations take submit_mutex (the sparse binds of on_submit take it on
     // their own): with the recorder, holding it while queueing commands could wait for the
     // recording thread, which needs it for its submits.
@@ -435,6 +441,13 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     // Apply pending operations
     PopPendingOperations();
+    if (thread_stats) {
+        SotcStats::flush_ns.fetch_add(
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - submit_begin)
+                                 .count()),
+            std::memory_order_relaxed);
+    }
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {

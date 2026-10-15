@@ -196,6 +196,7 @@ void Rasterizer::EliminateFastClear() {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
+    const SotcStats::CpCommandTimer cmd_timer;
 
     scheduler.PopPendingOperations();
 
@@ -256,6 +257,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                               u16 instance_sgpr_offset) {
     RENDERER_TRACE;
+    const SotcStats::CpCommandTimer cmd_timer;
 
     scheduler.PopPendingOperations();
 
@@ -421,6 +423,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
+    const SotcStats::CpCommandTimer cmd_timer;
 
     scheduler.PopPendingOperations();
 
@@ -535,6 +538,7 @@ void Rasterizer::DispatchDirect() {
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
+    const SotcStats::CpCommandTimer cmd_timer;
     SotcStats::cmd_kinds[5].fetch_add(1, std::memory_order_relaxed);
 
     scheduler.PopPendingOperations();

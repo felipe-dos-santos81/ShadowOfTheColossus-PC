@@ -284,10 +284,12 @@ void VideoOutDriver::Flip(const Request& req) {
     // Present the frame.
     presenter->Present(req.frame);
 
-    // sotc: SOTC_FPS=1 prints the flip rate every five seconds; SOTC_PRESENT_STATS=1 adds the
-    // presenter's own numbers and works on its own too.
+    // sotc: SOTC_FPS=1 prints the flip rate every five seconds; SOTC_PRESENT_STATS=1 and
+    // SOTC_THREAD_STATS=1 add the present thread's and the rendering threads' numbers and work on
+    // their own too.
     static const bool fps_log = std::getenv("SOTC_FPS") != nullptr ||
-                                std::getenv("SOTC_PRESENT_STATS") != nullptr;
+                                std::getenv("SOTC_PRESENT_STATS") != nullptr ||
+                                SotcStats::ThreadStatsEnabled();
     if (fps_log) {
         static auto window_start = std::chrono::steady_clock::now();
         static const auto run_start = window_start;
@@ -358,6 +360,24 @@ void VideoOutDriver::Flip(const Request& req) {
                     static_cast<double>(cpu_now - present_stats.cpu_ns) / 1e6 / seconds,
                     present_realtime ? "realtime" : "normal");
                 present_stats.cpu_ns = cpu_now;
+            }
+            if (SotcStats::ThreadStatsEnabled()) {
+                const double every = static_cast<double>(SotcStats::BusySampleEvery());
+                std::fprintf(
+                    stderr,
+                    "SOTC threads: cp %.0f ms/s busy (%.0f cmds/s, sampled 1/%llu), replay %.0f "
+                    "busy + %.0f spin + %.0f sleep ms/s (%.0f cmds/s), flushes %.0f/s (%.0f ms/s), "
+                    "backpressure %.1f/s\n",
+                    double(SotcStats::cp_busy_ns.exchange(0)) * every / 1e6 / seconds,
+                    double(SotcStats::cp_cmds.exchange(0)) * every / seconds,
+                    static_cast<unsigned long long>(SotcStats::BusySampleEvery()),
+                    double(SotcStats::replay_busy_ns.exchange(0)) / 1e6 / seconds,
+                    double(SotcStats::replay_spin_ns.exchange(0)) / 1e6 / seconds,
+                    double(SotcStats::replay_sleep_ns.exchange(0)) / 1e6 / seconds,
+                    double(SotcStats::replay_cmds.exchange(0)) / seconds,
+                    double(SotcStats::flushes.exchange(0)) / seconds,
+                    double(SotcStats::flush_ns.exchange(0)) / 1e6 / seconds,
+                    double(SotcStats::recorder_backpressure.exchange(0)) / seconds);
             }
             present_stats.iterations = 0;
             present_stats.presents = 0;

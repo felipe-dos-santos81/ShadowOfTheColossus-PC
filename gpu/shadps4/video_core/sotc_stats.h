@@ -30,6 +30,16 @@ inline std::atomic<uint64_t> commands{0}; ///< draws and dispatches recorded
 /// empty), dispatches, indirect dispatches.
 inline std::atomic<uint64_t> cmd_kinds[6]{};
 inline std::atomic<uint64_t> early_flushes{0}; ///< submits right after a write to a read-back page
+/// SOTC_THREAD_STATS=1: where each rendering thread's time goes, printed with the frame rate.
+inline std::atomic<uint64_t> cp_busy_ns{0}; ///< command processor recording Draw/Dispatch calls
+inline std::atomic<uint64_t> cp_cmds{0};    ///< ... commands timed (sampled 1 in N)
+inline std::atomic<uint64_t> replay_busy_ns{0};  ///< recorder replay thread executing commands
+inline std::atomic<uint64_t> replay_cmds{0};     ///< ... commands executed
+inline std::atomic<uint64_t> replay_spin_ns{0};  ///< ... spinning for work
+inline std::atomic<uint64_t> replay_sleep_ns{0}; ///< ... sleeping for work
+inline std::atomic<uint64_t> flushes{0};         ///< queue submits
+inline std::atomic<uint64_t> flush_ns{0};        ///< ... time spent in Scheduler::SubmitExecution
+inline std::atomic<uint64_t> recorder_backpressure{0}; ///< producer waited for the replay thread
 
 struct ScopedTimer {
     std::atomic<uint64_t>& total;
@@ -40,6 +50,51 @@ struct ScopedTimer {
                             std::chrono::steady_clock::now() - start)
                             .count(),
                         std::memory_order_relaxed);
+    }
+};
+
+/// SOTC_THREAD_STATS=1 turns the per-thread counters above on; read once.
+inline bool ThreadStatsEnabled() {
+    static const bool value = std::getenv("SOTC_THREAD_STATS") != nullptr;
+    return value;
+}
+
+/// SOTC_BUSY_EVERY=N times only 1 in N command-processor calls (default 16): two clock reads per
+/// command would cost more than the measurement. The print scales the sampled totals by this.
+inline uint64_t BusySampleEvery() {
+    static const uint64_t value = [] {
+        const char* v = std::getenv("SOTC_BUSY_EVERY");
+        const long n = v ? std::strtol(v, nullptr, 10) : 16;
+        return static_cast<uint64_t>(n < 1 ? 1 : n);
+    }();
+    return value;
+}
+
+/// Times one sampled command-processor call (see BusySampleEvery); does nothing when disabled.
+struct CpCommandTimer {
+    bool active = false;
+    std::chrono::steady_clock::time_point start{};
+
+    CpCommandTimer() {
+        if (!ThreadStatsEnabled()) {
+            return;
+        }
+        static thread_local uint64_t calls = 0;
+        active = (++calls % BusySampleEvery()) == 0;
+        if (active) {
+            start = std::chrono::steady_clock::now();
+        }
+    }
+    ~CpCommandTimer() {
+        if (!active) {
+            return;
+        }
+        cp_busy_ns.fetch_add(
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - start)
+                                      .count()),
+            std::memory_order_relaxed);
+        cp_cmds.fetch_add(1, std::memory_order_relaxed);
     }
 };
 
