@@ -223,6 +223,11 @@ def main():
     if 'fps60' in modes.lower():
         # The game waits for vblanks: at 60 Hz an uncapped frame still rounds up to 30 FPS.
         env.setdefault('BB_VBLANK_HZ', '120')
+    # The vblank rate is this port's biggest frame-cost knob on macOS, but not monotonically: 90 Hz
+    # measured 27-31 fps in the open world against 20-26 at 60 Hz, yet 1 of 15 sampled windows fell
+    # to 6 fps; 120 Hz measured 9-11 throughout, and uncapping (0) was slow in 7 of 9 windows. 60 Hz
+    # never dropped, so it stays the default until the slow mode is understood. BB_VBLANK_HZ=90 is
+    # the opt-in.
 
     probe = find_probe()
     if sys.platform == 'win32':
