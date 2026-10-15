@@ -90,7 +90,7 @@ Darwin*)
         -DVCPKG_INSTALLED_DIR="$PWD/out/vcpkg_installed" >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF} (x86-64, Rosetta 2)"
     tests=(compat-mac-test pad-test file-mods-test content-test runtime-test sema-test
-           window-scale-test hdr-setting-test metal-layer-edr-test)
+           window-scale-test hdr-setting-test periodic-submit-test metal-layer-edr-test)
     targets=(bb-probe bb-gpu-capabilities)
     if [[ ${1:-} == --test ]]; then targets+=("${tests[@]}"); fi
     if ! ninja -C out/gpu "${targets[@]}" > out/gpu-build.log 2>&1; then
@@ -188,7 +188,7 @@ if [[ ${1:-} == --test ]]; then
     # not a reason to skip.
     CXX=${CXX:-$(command -v c++ || command -v g++ || true)}
     [[ -n $CXX ]] || { echo 'Need a C++ compiler (set CXX) for the header-only tests.' >&2; exit 1; }
-    for header_test in window_scale hdr_setting; do
+    for header_test in window_scale hdr_setting periodic_submit; do
         "$CXX" -std=c++17 -O2 -g -Wall -Wextra -Werror -Igpu/shim "tests/test_${header_test}.cpp" \
             -o "out/${header_test//_/-}-test"
         "out/${header_test//_/-}-test"

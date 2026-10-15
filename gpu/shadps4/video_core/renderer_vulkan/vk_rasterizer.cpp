@@ -16,6 +16,7 @@
 #include "common/elf_info.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "bbport_flush.h"
 #include "core/memory.h"
 #include "video_core/sotc_lod_stats.h"
 #include "shader_recompiler/runtime_info.h"
@@ -792,24 +793,14 @@ void Rasterizer::FlushPeriodic() {
     // it sits idle while the command processor records. Submitting every N draws/dispatches lets
     // it run the frame during the recording. A submit inside a render pass cuts it, so wait for a
     // command outside one, up to 4 * N. From periodic_flush_commands of Pink-shadPS4
-    // (luizgustavs). SOTC_FLUSH_EVERY=N sets it, 0 = off.
-    static const u32 every = [this] {
-        if (const char* v = std::getenv("SOTC_FLUSH_EVERY")) {
-            return static_cast<u32>(std::strtoul(v, nullptr, 10));
-        }
-        // An explicit SOTC_FLUSH_US turns the periodic submit on for any GPU (the launcher's
-        // option for AMD and Intel cards, not tested there).
-        if (const char* v = std::getenv("SOTC_FLUSH_US"); v && std::strtoull(v, nullptr, 10) != 0) {
-            return 256u;
-        }
-        // SotC: +20% fps in the open world (14-15 -> 18). Other games keep the upstream behavior.
-        // Only measured on NVIDIA; Pink-shadPS4 advises turning it off on AMD (black screen).
-        constexpr u32 VendorNvidia = 0x10DE;
-        return Common::ElfInfo::Instance().GameSerial() == "CUSA08809" &&
-                       instance.GetVendorID() == VendorNvidia
-                   ? 256u
-                   : 0u;
+    // (luizgustavs). SOTC_FLUSH_EVERY=N sets it, 0 = off; bbport_flush.h holds the defaults.
+    static const BbPeriodicSubmit submit = [this] {
+        return BbPeriodicSubmitFor(std::getenv("SOTC_FLUSH_EVERY"), std::getenv("SOTC_FLUSH_US"),
+                                   Common::ElfInfo::Instance().GameSerial() == "CUSA08809",
+                                   instance.GetVendorID(),
+                                   instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp);
     }();
+    const u32 every = submit.count;
     // sotc: the command buffer wrote a page the guest reads back: submit it now, the GPU runs
     // it while the guest gets there, and the readback finds it done (or nearly). SOTC_RB_EARLY=1
     // turns it on; measured within noise on the attract demo, so off by default.
@@ -826,16 +817,10 @@ void Rasterizer::FlushPeriodic() {
     if (every == 0) {
         return;
     }
-    // sotc: submit by recording time instead (SOTC_FLUSH_US, default 500 where the periodic
-    // submit is on and SOTC_FLUSH_EVERY is not set): the GPU gets work at a steady pace whether
-    // a scene has few heavy commands or thousands of light ones. Attract demo: +10-15% in most
-    // scenes, canyon bridge +2% (count based: 64 helped the first and hurt the second).
-    static const u64 flush_us = [] {
-        if (const char* v = std::getenv("SOTC_FLUSH_US")) {
-            return std::strtoull(v, nullptr, 10);
-        }
-        return std::getenv("SOTC_FLUSH_EVERY") ? u64{0} : u64{500};
-    }();
+    // sotc: submit by recording time instead (SOTC_FLUSH_US): the GPU gets work at a steady pace
+    // whether a scene has few heavy commands or thousands of light ones. Attract demo: +10-15% in
+    // most scenes, canyon bridge +2% (count based: 64 helped the first and hurt the second).
+    const u64 flush_us = submit.us;
     const u64 tick = scheduler.CurrentTick();
     if (tick != commands_tick) {
         commands_tick = tick;
