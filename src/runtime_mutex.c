@@ -85,11 +85,44 @@ static int32_t ensure_mutex(GuestMutex **mutex) {
     pthread_mutex_unlock(&static_init);
     return e;
 }
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+/* macos: a contended Darwin mutex sleeps in the kernel at once, and its release wakes the
+ * sleeper with another system call (__psynch_mutexwait, __psynch_mutexdrop). The game's job
+ * workers take one queue mutex per job (guest 0x438700): in gameplay they spent about half
+ * their running time in those two calls. The critical sections are short, so the waiter first
+ * spins while the owner (our hint, not the pthread word) still holds it: up to 20 us cut the
+ * workers' kernel time 3x and gave ~+5% FPS at the Shrine of Worship (M3 Max, 5 A/B pairs).
+ * SOTC_MUTEX_SPIN_US: the spin limit in microseconds (default 20, 0 = off). */
+static int spin_lock(GuestMutex *m) {
+    static uint64_t limit = UINT64_MAX;
+    if (limit == UINT64_MAX) {
+        const char *v = getenv("SOTC_MUTEX_SPIN_US");
+        mach_timebase_info_data_t base;
+        mach_timebase_info(&base);
+        limit = (uint64_t)(v ? atoi(v) : 20) * 1000u * base.denom / base.numer;
+    }
+    if (!limit) return EBUSY;
+    const uint64_t end = mach_absolute_time() + limit;
+    for (unsigned i = 1;; ++i) {
+        __builtin_ia32_pause();
+        /* The owner hint is stale while a condition wait holds the mutex released: try anyway now and then. */
+        if (!__atomic_load_n(&m->owner, __ATOMIC_RELAXED) || i % 64 == 0) {
+            const int native = pthread_mutex_trylock(&m->native);
+            if (native != EBUSY) return native;
+        }
+        if ((i & 15) == 0 && mach_absolute_time() >= end) return EBUSY;
+    }
+}
+#endif
 static ABI int32_t mutex_lock(GuestMutex **mutex) {
     int32_t e = ensure_mutex(mutex);
     if (e) return e;
     GuestMutex *m = *mutex;
     int native = pthread_mutex_trylock(&m->native);
+#ifdef __APPLE__
+    if (native == EBUSY) native = spin_lock(m);
+#endif
     for (int waited = 0; native == EBUSY;) {
         struct timespec slice;
         clock_gettime(CLOCK_REALTIME, &slice);
