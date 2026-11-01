@@ -734,7 +734,7 @@ struct SignalImpl : public PageManager::Impl {
 #ifdef _WIN32
         const u64 rip = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord->Rip;
 #else
-        const u64 rip = 0;
+        const u64 rip = reinterpret_cast<u64>(Common::GetRip(context)); // macos: the guest instruction too
 #endif
         std::scoped_lock lk{stats_mutex};
         ++counts[{is_gpu_thread, rip, addr & ~VAddr{0xFFFF}}];
