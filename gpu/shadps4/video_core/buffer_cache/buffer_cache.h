@@ -388,6 +388,10 @@ private:
     void UnbindResident(std::span<const Backing> released);
     /// sotc: per arena block, the use epoch (seconds, wrapping, 0 = never) of its last bind.
     u16* block_last_use{};
+    /// macos: SOTC_RB_DIRECT_PROBE=1 (docs/sotc/PLANO-LEITURA-DIRETA-MAC.md, step 0): the tick of
+    /// the last recorded GPU write of each block, to classify what each readback waits for.
+    u32* block_write_tick{};
+    void ProbeReadback(std::span<const ReadbackItem> pending);
     /// sotc: blocks MaybeEvictCold gave back and nothing bound again yet.
     IntervalList<> evicted_ranges;
     /// sotc: evicted blocks a shader faulted back in; never evicted again.

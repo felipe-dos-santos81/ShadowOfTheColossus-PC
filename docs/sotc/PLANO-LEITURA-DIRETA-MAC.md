@@ -111,3 +111,25 @@ finish). Nesse caso a etapa 2 vem antes da 1, e a meta passa a ser ~28 FPS, não
   escrita: no gameplay as leituras de verdade pesam mais que o falso compartilhamento.
 - A trava da fila de jobs do jogo (~37% do tempo de execução dos workers mesmo com o spin): é do
   próprio jogo (`eboot+0x38700`), não do port.
+
+## Estado
+
+- 01/11: plano escrito (`de4558f`).
+- 01/11: **etapa 0 feita** (`SOTC_RB_DIRECT_PROBE=1`: tick da última escrita da GPU por bloco de
+  64 KiB, gravado em `AddGpuModified`; cada leitura que espera é classificada em
+  `BeginAsyncReadback`). Resultado, por janela de 5 s:
+
+  | cena | leituras | dados já prontos | envio anterior ainda rodando | command buffer aberto |
+  |---|---|---|---|---|
+  | Santuário, rodada 1 | ~4400–4570 | **77–79%** | 14–15% (~2,5 ticks antes) | 7–8% |
+  | Santuário, rodada 2 | ~4740–4900 | **69–70%** | 22% (~2,8 ticks antes) | 8–9% |
+  | abertura (60 FPS) | ~2200–2550 | **62–67%** | 22–29% (~2,4 ticks antes) | 8–12% |
+
+  A conta é conservadora (bloco de 64 KiB: o tick do bloco é o da escrita mais nova nele). Ou
+  seja, **7 em cada 10 leituras esperam uma cópia na fila atrás de todo o trabalho atual, quando
+  os dados já estavam prontos.** Bem acima do limite de ~30% da seção 3: as etapas 1 e 2 seguem
+  como planejado.
+- 01/11, achado no caminho: o keep-alive da GPU com despachos de ~15 ms custava 7–16% nas cenas em
+  que a GPU limita (abertura a 60 FPS: 720p 36,2 contra 43,3 FPS sem ele; 1080p 32,9 contra
+  35,4). Com despachos de ~1,5 ms o custo some (46,8 contra 46,0 FPS) e o gameplay continua com a
+  GPU a 1380 MHz (25–27 FPS).

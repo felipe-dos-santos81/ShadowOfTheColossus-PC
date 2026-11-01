@@ -107,6 +107,10 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     block_last_use =
         static_cast<u16*>(std::calloc(blocks_per_arena_page * NUM_ARENA_PAGES, sizeof(u16)));
     ASSERT_MSG(block_last_use, "No memory for the arena block use table");
+    if (const char* v = std::getenv("SOTC_RB_DIRECT_PROBE"); v && v[0] == '1') {
+        block_write_tick =
+            static_cast<u32*>(std::calloc(blocks_per_arena_page * NUM_ARENA_PAGES, sizeof(u32)));
+    }
     epoch_start = std::chrono::steady_clock::now();
     // sotc: SOTC_RB_NARROW only in the precise readback mode, where every GPU-modified page is
     // read-protected: the relaxed mode reads back only on write faults, and the wide window is
@@ -141,6 +145,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 
 BufferCache::~BufferCache() {
     std::free(block_last_use);
+    std::free(block_write_tick);
 }
 
 void BufferCache::TickFrame() {
@@ -368,6 +373,9 @@ void BufferCache::BeginAsyncReadback(AsyncReadback& readback) {
         }
         return;
     }
+    if (block_write_tick) {
+        ProbeReadback(readback.pending);
+    }
     // Held until FinishAsyncReadback: the pool must not hand it out again before.
     const auto download =
         staging_pool.Request(total, VideoCore::MemoryType::HostCached, 0, true);
@@ -386,6 +394,48 @@ void BufferCache::BeginAsyncReadback(AsyncReadback& readback) {
     readback.waiting = true;
     inflight_readbacks.push_back(&readback);
     SotcStats::readback_finish.fetch_add(1, std::memory_order_relaxed);
+}
+
+void BufferCache::ProbeReadback(std::span<const ReadbackItem> pending) {
+    // macos: what a readback that waits needs: the newest GPU write of the blocks it downloads is
+    // done already ("ready"), in an earlier submit still running ("earlier", with how many ticks
+    // before the open one), or in the command buffer being recorded ("open"). Printed every 5 s.
+    u32 newest = 0;
+    for (const auto& item : pending) {
+        for (const auto& [start, size] : item.gpu_ranges) {
+            if (size == 0) {
+                continue;
+            }
+            for (u64 block = start >> block_shift; block <= (start + size - 1) >> block_shift; ++block) {
+                newest = std::max(newest, block_write_tick[block]);
+            }
+        }
+    }
+    static u64 ready = 0, earlier = 0, open = 0, unknown = 0, ticks_back = 0;
+    static auto last = std::chrono::steady_clock::now();
+    const u64 current = scheduler.CurrentTick();
+    if (newest == 0) {
+        ++unknown;
+    } else if (scheduler.IsFree(newest)) {
+        ++ready;
+    } else if (newest < static_cast<u32>(current)) {
+        ++earlier;
+        ticks_back += static_cast<u32>(current) - newest;
+    } else {
+        ++open;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last >= std::chrono::seconds(5)) {
+        last = now;
+        const u64 total = std::max<u64>(ready + earlier + open + unknown, 1);
+        std::fprintf(stderr,
+                     "SOTC RB DIRECT probe: %llu readbacks; data ready %.0f%%, earlier submit %.0f%% "
+                     "(%.1f ticks back), open command buffer %.0f%%, unknown %.0f%%\n",
+                     static_cast<unsigned long long>(total), 100.0 * ready / total,
+                     100.0 * earlier / total, earlier ? double(ticks_back) / earlier : 0.0,
+                     100.0 * open / total, 100.0 * unknown / total);
+        ready = earlier = open = unknown = ticks_back = 0;
+    }
 }
 
 void BufferCache::MarkInflightReadbacksDirty(VAddr addr, u64 size) {
@@ -1056,6 +1106,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
 
 void BufferCache::AddGpuModified(VAddr addr, u64 size) {
     MarkInflightReadbacksDirty(addr, size);
+    if (block_write_tick && size != 0) {
+        const u32 tick = static_cast<u32>(scheduler.CurrentTick());
+        for (u64 block = addr >> block_shift; block <= (addr + size - 1) >> block_shift; ++block) {
+            block_write_tick[block] = tick;
+        }
+    }
     // sotc: SOTC_GPUMOD_WATCH=<address>: who marks it as GPU-written (first 40 times).
     static const VAddr env_watch = [] {
         const char* v = std::getenv("SOTC_GPUMOD_WATCH");
