@@ -107,7 +107,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     block_last_use =
         static_cast<u16*>(std::calloc(blocks_per_arena_page * NUM_ARENA_PAGES, sizeof(u16)));
     ASSERT_MSG(block_last_use, "No memory for the arena block use table");
-    if (const char* v = std::getenv("SOTC_RB_DIRECT_PROBE"); v && v[0] == '1') {
+    rb_probe = std::getenv("SOTC_RB_DIRECT_PROBE") && std::getenv("SOTC_RB_DIRECT_PROBE")[0] == '1';
+    if (const char* v = std::getenv("SOTC_RB_DIRECT")) {
+        rb_direct = std::atoi(v);
+    }
+    if (rb_probe || rb_direct != 0) {
         block_write_tick =
             static_cast<u32*>(std::calloc(blocks_per_arena_page * NUM_ARENA_PAGES, sizeof(u32)));
     }
@@ -374,7 +378,45 @@ void BufferCache::BeginAsyncReadback(AsyncReadback& readback) {
         return;
     }
     if (block_write_tick) {
-        ProbeReadback(readback.pending);
+        const u32 newest = NewestWriteTick(readback.pending);
+        if (rb_probe) {
+            ProbeReadback(newest);
+        }
+        // macos: SOTC_RB_DIRECT=1 (docs/sotc/PLANO-LEITURA-DIRETA-MAC.md). Unified memory: data
+        // the GPU already wrote is read where it is, now; data of an earlier submit after that
+        // submit only. Data of the command buffer being recorded goes the usual way.
+        if (rb_direct == 1 && newest != 0 && newest < static_cast<u32>(scheduler.CurrentTick())) {
+            if (scheduler.IsFree(newest)) {
+                if (ApplyDirect(readback)) {
+                    SotcStats::readback_direct_now.fetch_add(1, std::memory_order_relaxed);
+                    if (readback.is_write) {
+                        MarkWrittenByGuest(readback.device_addr, readback.size);
+                    }
+                    return;
+                }
+            } else {
+                readback.direct = true;
+                readback.tick = newest;
+                readback.waiting = true;
+                inflight_readbacks.push_back(&readback);
+                SotcStats::readback_direct_wait.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+        if (rb_direct == 2 && newest != 0 && scheduler.IsFree(newest)) {
+            readback.direct_check.resize(total);
+            for (const auto& item : readback.pending) {
+                bool ok = true;
+                for (const auto& copy : item.copies) {
+                    ok = ok && ReadArenaDirect(item.arena->cpu_addr + copy.srcOffset, copy.size,
+                                               readback.direct_check.data() + copy.dstOffset);
+                }
+                if (!ok) {
+                    readback.direct_check.clear();
+                    break;
+                }
+            }
+        }
     }
     // Held until FinishAsyncReadback: the pool must not hand it out again before.
     const auto download =
@@ -396,10 +438,7 @@ void BufferCache::BeginAsyncReadback(AsyncReadback& readback) {
     SotcStats::readback_finish.fetch_add(1, std::memory_order_relaxed);
 }
 
-void BufferCache::ProbeReadback(std::span<const ReadbackItem> pending) {
-    // macos: what a readback that waits needs: the newest GPU write of the blocks it downloads is
-    // done already ("ready"), in an earlier submit still running ("earlier", with how many ticks
-    // before the open one), or in the command buffer being recorded ("open"). Printed every 5 s.
+u32 BufferCache::NewestWriteTick(std::span<const ReadbackItem> pending) const {
     u32 newest = 0;
     for (const auto& item : pending) {
         for (const auto& [start, size] : item.gpu_ranges) {
@@ -411,6 +450,106 @@ void BufferCache::ProbeReadback(std::span<const ReadbackItem> pending) {
             }
         }
     }
+    return newest;
+}
+
+bool BufferCache::ReadArenaDirect(VAddr addr, u64 size, u8* out) {
+    const auto& types = instance.GetMemoryProperties().memoryTypes;
+    while (size != 0) {
+        const u64 block = addr >> block_shift;
+        const u64 piece = std::min<u64>(size, ((block + 1) << block_shift) - addr);
+        vk::DeviceMemory memory{};
+        u64 memory_block = 0;
+        resident_ranges.ForEachInRange(block, block + 1, [&](const Backing& backing) {
+            memory = backing.memory;
+            memory_block = backing.offset + (block - backing.start);
+        });
+        const auto found = chunk_by_memory.find(static_cast<VkDeviceMemory>(memory));
+        if (!memory || found == chunk_by_memory.end()) {
+            return false;
+        }
+        ArenaChunk& chunk = *found->second;
+        if (!chunk.mapped) {
+            if (!(types[chunk.memory_type].propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible)) {
+                return false;
+            }
+            const auto [result, pointer] = instance.GetDevice().mapMemory(chunk.memory, 0, VK_WHOLE_SIZE);
+            if (result != vk::Result::eSuccess) {
+                return false;
+            }
+            chunk.mapped = static_cast<u8*>(pointer);
+        }
+        std::memcpy(out, chunk.mapped + (memory_block << block_shift) + (addr - (block << block_shift)),
+                    piece);
+        addr += piece;
+        out += piece;
+        size -= piece;
+    }
+    return true;
+}
+
+bool BufferCache::ApplyDirect(const AsyncReadback& readback) {
+    u64 total = 0;
+    for (const auto& item : readback.pending) {
+        for (const auto& copy : item.copies) {
+            total = std::max<u64>(total, copy.dstOffset + copy.size);
+        }
+    }
+    direct_buffer.resize(total);
+    for (const auto& item : readback.pending) {
+        for (const auto& copy : item.copies) {
+            if (!ReadArenaDirect(item.arena->cpu_addr + copy.srcOffset, copy.size,
+                                 direct_buffer.data() + copy.dstOffset)) {
+                return false;
+            }
+        }
+    }
+    // The same apply as a GPU copy's (the BPE heap guards included), then the same bookkeeping.
+    ApplyDownloads(readback.pending, direct_buffer.data(), 0);
+    SubtractDownloaded(readback.pending);
+    return true;
+}
+
+void BufferCache::CheckDirect(const AsyncReadback& readback) {
+    // macos: SOTC_RB_DIRECT=2. The bytes read from the mapped arena when the readback began (its
+    // data already written by the GPU) against what the GPU copy brought. Printed every 5 s.
+    static u64 compared = 0, differ = 0, bytes = 0, differ_bytes = 0, logged = 0;
+    static auto last = std::chrono::steady_clock::now();
+    bool same = true;
+    for (const auto& item : readback.pending) {
+        for (const auto& copy : item.copies) {
+            const u64 at = copy.dstOffset - readback.download_offset;
+            bytes += copy.size;
+            if (std::memcmp(readback.direct_check.data() + at, readback.download_mapped + at,
+                            copy.size) != 0) {
+                for (u64 i = 0; i < copy.size; ++i) {
+                    differ_bytes += readback.direct_check[at + i] != readback.download_mapped[at + i];
+                }
+                if (same && logged++ < 8) {
+                    std::fprintf(stderr, "SOTC RB DIRECT check: differs at %#llx+%#llx\n",
+                                 static_cast<unsigned long long>(item.arena->cpu_addr + copy.srcOffset),
+                                 static_cast<unsigned long long>(copy.size));
+                }
+                same = false;
+            }
+        }
+    }
+    ++compared;
+    differ += !same;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last >= std::chrono::seconds(5)) {
+        last = now;
+        std::fprintf(stderr, "SOTC RB DIRECT check: %llu readbacks compared (%llu KiB), %llu differ (%llu bytes)\n",
+                     static_cast<unsigned long long>(compared), static_cast<unsigned long long>(bytes >> 10),
+                     static_cast<unsigned long long>(differ), static_cast<unsigned long long>(differ_bytes));
+        compared = differ = bytes = differ_bytes = 0;
+    }
+}
+
+void BufferCache::ProbeReadback(u32 newest) {
+    // macos: what a readback that waits needs: the newest GPU write of the blocks it downloads is
+    // done already ("ready"), in an earlier submit still running ("earlier", with how many ticks
+    // before the open one), or in the command buffer being recorded ("open"). Printed every 5 s.
     static u64 ready = 0, earlier = 0, open = 0, unknown = 0, ticks_back = 0;
     static auto last = std::chrono::steady_clock::now();
     const u64 current = scheduler.CurrentTick();
@@ -482,6 +621,16 @@ void BufferCache::FinishAsyncReadback(AsyncReadback& readback) {
     }
     readback.finished = true;
     std::erase(inflight_readbacks, &readback);
+    if (readback.direct) {
+        // macos: a GPU write recorded since (dirty) or memory no longer readable: the usual way.
+        if (readback.dirty || !ApplyDirect(readback)) {
+            DownloadMemory(readback.arena, readback.window_start, readback.window_size);
+        }
+        if (readback.is_write) {
+            MarkWrittenByGuest(readback.device_addr, readback.size);
+        }
+        return;
+    }
     const Vulkan::StagingBufferRef download{
         .buffer = readback.download_buffer,
         .offset = readback.download_offset,
@@ -497,6 +646,9 @@ void BufferCache::FinishAsyncReadback(AsyncReadback& readback) {
         DownloadMemory(readback.arena, readback.window_start, readback.window_size);
     } else {
         download.buffer->Invalidate(download.offset, download.size);
+        if (!readback.direct_check.empty()) {
+            CheckDirect(readback);
+        }
         // sotc: the ranges leave the GPU-modified set only once the backing holds their data:
         // the command processor's clean reads (ReadClean) would read the stale backing before.
         ApplyDownloads(readback.pending, download.mapped, download.offset);

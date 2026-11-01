@@ -591,6 +591,13 @@ void VideoOutDriver::Flip(const Request& req) {
             ReportPrintf(report, "SOTC readback finish: %llu for bytes the guest asked\n",
                          static_cast<unsigned long long>(
                              SotcStats::readback_finish_asked.exchange(0)));
+            if (const u64 now_direct = SotcStats::readback_direct_now.exchange(0),
+                wait_direct = SotcStats::readback_direct_wait.exchange(0);
+                now_direct + wait_direct != 0) {
+                ReportPrintf(report, "SOTC readback direct: %llu at once, %llu after their own tick\n",
+                             static_cast<unsigned long long>(now_direct),
+                             static_cast<unsigned long long>(wait_direct));
+            }
             if (const u64 streamed = SotcStats::rb_stream_windows.exchange(0)) {
                 ReportPrintf(report, "SOTC readback stream windows: %llu\n",
                              static_cast<unsigned long long>(streamed));

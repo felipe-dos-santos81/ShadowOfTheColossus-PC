@@ -71,6 +71,9 @@ inline std::atomic<uint64_t> current_program{0}; ///< hash of the dispatch being
 inline std::atomic<uint64_t> readback_ahead{0};   ///< downloads of already submitted work
 inline std::atomic<uint64_t> readback_finish{0};  ///< downloads that flushed the current work
 inline std::atomic<uint64_t> readback_finish_asked{0}; ///< ... for bytes the guest itself asked
+/// macos: SOTC_RB_DIRECT=1 readbacks read from the arena's memory at once / after their own tick.
+inline std::atomic<uint64_t> readback_direct_now{0};
+inline std::atomic<uint64_t> readback_direct_wait{0};
 inline std::atomic<uint64_t> heap_guard_builds{0}; ///< readbacks into the BPE heap
 inline std::atomic<uint64_t> heap_guard_stale_hits{0}; ///< writes the previous guard vouched for
 inline std::atomic<uint64_t> upload_deferred{0};        ///< first uploads put off to a later frame

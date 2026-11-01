@@ -133,3 +133,26 @@ finish). Nesse caso a etapa 2 vem antes da 1, e a meta passa a ser ~28 FPS, não
   que a GPU limita (abertura a 60 FPS: 720p 36,2 contra 43,3 FPS sem ele; 1080p 32,9 contra
   35,4). Com despachos de ~1,5 ms o custo some (46,8 contra 46,0 FPS) e o gameplay continua com a
   GPU a 1380 MHz (25–27 FPS).
+- 01/11, correção do plano: com a cópia ainda na GPU, esperar só o tick dos dados não adianta (a
+  fila da GPU é em ordem: a cópia roda depois de tudo o que já foi gravado). As etapas 1 e 2
+  viraram uma só: `SOTC_RB_DIRECT=1`.
+- 01/11: **modo de conferência** (`SOTC_RB_DIRECT=2`): leituras como antes, e os mesmos bytes lidos
+  também direto da memória mapeada da arena (pedaços de 64 MiB mapeados uma vez,
+  `ReadArenaDirect`) e comparados com a cópia da GPU. Santuário + abertura: ~85 mil leituras,
+  ~1,3 GB comparados, **0 bytes diferentes**.
+- 01/11: **etapas 1+2 feitas** (`SOTC_RB_DIRECT=1`, desligado por padrão). Dados prontos: aplicados
+  na hora pela `ApplyDownloads` (guarda do heap igual), sem cópia nem espera. Dados de um envio
+  anterior: espera só o tick deles e lê direto. Dados do command buffer aberto: caminho de hoje.
+  A/B intercalado (M3 Max, 720p):
+
+  | cena | desligado | ligado |
+  |---|---|---|
+  | Santuário (modo 30), rodada A | 25,4 FPS | **30,0** (mín. 30,0) |
+  | Santuário (modo 30), rodada B | 26,8 FPS | **30,0** (mín. 30,0) |
+  | esperas de leitura por quadro | 35–42 | 6,5–8 |
+  | abertura (modo 60) | 46,3 FPS | **51,7** |
+
+  ~85% das leituras saem na hora (`SOTC readback direct: ~3600–3900 at once, ~500–700 after their
+  own tick` por 5 s). Capturas do Santuário iguais às do caminho de hoje.
+- Falta a etapa 3: o usuário joga a rota completa com `SOTC_RB_DIRECT=1` (santuário → cavalo →
+  troca de área → colosso) antes de virar padrão no Mac.

@@ -250,6 +250,11 @@ private:
         Buffer* download_buffer{};
         u64 download_size{};
         boost::container::small_vector<ReadbackItem, 16> pending;
+        /// macos: SOTC_RB_DIRECT=2, the bytes read straight from the arena's memory, laid out
+        /// as the download (compared with it in FinishAsyncReadback).
+        std::vector<u8> direct_check;
+        /// macos: SOTC_RB_DIRECT=1, waits for its data's own tick, then reads the arena's memory.
+        bool direct{};
     };
     void BeginAsyncReadback(AsyncReadback& readback);
     /// sotc: marks bytes a guest write fault asked for CPU-modified, unless pages of them
@@ -377,6 +382,7 @@ private:
         u32 memory_type{};
         u64 used_blocks{};
         std::map<u64, u64> free_runs; ///< first block -> number of free blocks
+        u8* mapped{}; ///< macos: host mapping of the whole chunk (unified memory, SOTC_RB_DIRECT)
     };
     std::vector<std::unique_ptr<ArenaChunk>> arena_chunks;
     std::unordered_map<VkDeviceMemory, ArenaChunk*> chunk_by_memory;
@@ -391,7 +397,20 @@ private:
     /// macos: SOTC_RB_DIRECT_PROBE=1 (docs/sotc/PLANO-LEITURA-DIRETA-MAC.md, step 0): the tick of
     /// the last recorded GPU write of each block, to classify what each readback waits for.
     u32* block_write_tick{};
-    void ProbeReadback(std::span<const ReadbackItem> pending);
+    bool rb_probe{};
+    /// macos: SOTC_RB_DIRECT: 2 = check mode (readbacks as before, and the same bytes also read
+    /// straight from the arena's mapped memory and compared).
+    int rb_direct{};
+    u32 NewestWriteTick(std::span<const ReadbackItem> pending) const;
+    void ProbeReadback(u32 newest);
+    /// macos: copies arena bytes from the mapped chunk memory; false where a block is not
+    /// resident or its memory is not host-visible.
+    bool ReadArenaDirect(VAddr addr, u64 size, u8* out);
+    void CheckDirect(const AsyncReadback& readback);
+    /// macos: applies the readback's downloads from the arena's mapped memory (no GPU copy);
+    /// false, with nothing applied, where that memory cannot be read.
+    bool ApplyDirect(const AsyncReadback& readback);
+    std::vector<u8> direct_buffer;
     /// sotc: blocks MaybeEvictCold gave back and nothing bound again yet.
     IntervalList<> evicted_ranges;
     /// sotc: evicted blocks a shader faulted back in; never evicted again.
