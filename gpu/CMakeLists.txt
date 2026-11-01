@@ -326,13 +326,15 @@ elseif (APPLE)
     add_library(atrac9 STATIC ${BB_ATRAC9})
     target_compile_options(atrac9 PRIVATE -w)
     set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
-    add_executable(bb-probe ../src/probe.c ${BB_RUNTIME} ../src/compat_mac.c ../src/vulkan_smoke.c)
+    enable_language(OBJC)
+    add_executable(bb-probe ../src/probe.c ${BB_RUNTIME} ../src/compat_mac.c ../src/compat_mac_gpu.m ../src/vulkan_smoke.c)
+    set_source_files_properties(../src/compat_mac_gpu.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-Wall;-Wextra;-Werror")
     set_target_properties(bb-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF POSITION_INDEPENDENT_CODE OFF
         BUILD_RPATH "@executable_path")
     target_compile_definitions(bb-probe PRIVATE _DARWIN_C_SOURCE)
     target_compile_options(bb-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
     target_include_directories(bb-probe PRIVATE .. ../src)
-    target_link_libraries(bb-probe PRIVATE bbgpu atrac9 -pthread)
+    target_link_libraries(bb-probe PRIVATE bbgpu atrac9 -pthread "-framework IOKit")
     target_link_options(bb-probe PRIVATE "LINKER:-no_pie,-pagezero_size,0x4000,-image_base,0x700000000000"
         "LINKER:-segaddr,GUEST_EBOOT,0x400000,-segaddr,GUEST_LOW,0x700000000,-segaddr,GUEST_USER,0x7000000000"
         "LINKER:-stack_size,0x1000000")

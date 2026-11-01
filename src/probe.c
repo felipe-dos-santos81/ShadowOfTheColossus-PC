@@ -1648,6 +1648,9 @@ int main(int argc, char **argv) {
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
 #endif
+#ifdef __APPLE__
+    compat_mac_gpu_keepalive(); /* macos: else the GPU stays at its lowest clock (compat_mac_gpu.m) */
+#endif
     int cpu_only = 0, strict_imports = 0;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *sotc_cpu=NULL, *sotc_cmdline=NULL;

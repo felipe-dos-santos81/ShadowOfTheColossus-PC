@@ -28,6 +28,8 @@ void compat_mac_reserve_guest(void);
  * guard pages, too small for the fault handler (probe.c). */
 void compat_mac_altstack(void);
 void compat_mac_game_qos(void);
+/* Starts the thread that keeps the GPU at its full clock (compat_mac_gpu.m; SOTC_GPU_KEEPALIVE=0: off). */
+void compat_mac_gpu_keepalive(void);
 
 #define CLOCK_REALTIME_COARSE CLOCK_REALTIME
 #define PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP PTHREAD_RECURSIVE_MUTEX_INITIALIZER
