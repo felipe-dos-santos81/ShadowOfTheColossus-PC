@@ -5,7 +5,29 @@
 #include "video_core/renderer_vulkan/vk_framegen.h"
 #include "video_core/renderer_vulkan/vk_fsrfg.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+// macos: Streamline is Windows-only (LoadInterposer returns null elsewhere). The capture of the
+// frame inputs below is shared with FSR 3 frame generation and stays; these stand-ins let the
+// Windows-typed code compile.
+#include <chrono>
+using HMODULE = void*;
+union LARGE_INTEGER {
+    long long QuadPart;
+};
+static void QueryPerformanceCounter(LARGE_INTEGER* t) {
+    t->QuadPart = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count();
+}
+static void QueryPerformanceFrequency(LARGE_INTEGER* f) {
+    f->QuadPart = 1000000000;
+}
+static void* GetProcAddress(HMODULE, const char*) {
+    return nullptr;
+}
+#endif
 
 #include <algorithm>
 #include <array>
@@ -792,6 +814,7 @@ bool Capturing() {
     }
 }
 
+#ifdef _WIN32 // macos
 // SOTC_DLSSG_ASSUME_FOCUS=1 (background test runs only): DLSS-G pauses while the game window
 // is not the foreground window. The scripted benchmarks keep their window behind the user's
 // (it must never take the focus), so Streamline's GetForegroundWindow import is pointed at a
@@ -854,6 +877,7 @@ void PatchForegroundWindow(const wchar_t* module_name) {
         }
     }
 }
+#endif // _WIN32
 
 void SetOptions(bool on) {
     sl::DLSSGOptions options{};
@@ -900,6 +924,9 @@ PFN_vkGetInstanceProcAddr LoadInterposer() {
     if (!fg_wanted && !sr_wanted) {
         return nullptr;
     }
+#ifndef _WIN32
+    return nullptr; // macos: no Streamline (WantStreamline/HasNvidia are false there anyway)
+#else
     if (const char* l = std::getenv("SOTC_DLSSG_LOG")) {
         log_level = std::atoi(l);
     }
@@ -972,6 +999,7 @@ PFN_vkGetInstanceProcAddr LoadInterposer() {
     std::fprintf(stderr, "SOTC DLSSG: Streamline %d.%d.%d loaded\n", SL_VERSION_MAJOR,
                  SL_VERSION_MINOR, SL_VERSION_PATCH);
     return gipa;
+#endif // _WIN32
 }
 
 void OnDeviceCreated(const Instance& instance) {

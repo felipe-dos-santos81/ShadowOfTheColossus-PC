@@ -44,6 +44,16 @@ void SkipLoadAsZero(void* ctx, u8 gpr_index, u64 length) {
     auto& gregs = ((ucontext_t*)ctx)->uc_mcontext.gregs;
     gregs[regs[gpr_index & 15]] = 0;
     gregs[REG_RIP] += length;
+#elif defined(__APPLE__) && defined(ARCH_X86_64)
+    // macos: Darwin's thread state is not in x86 encoding order.
+    using State = std::remove_reference_t<decltype(((ucontext_t*)ctx)->uc_mcontext->__ss)>;
+    static constexpr u64 State::*regs[16] = {
+        &State::__rax, &State::__rcx, &State::__rdx, &State::__rbx, &State::__rsp, &State::__rbp,
+        &State::__rsi, &State::__rdi, &State::__r8,  &State::__r9,  &State::__r10, &State::__r11,
+        &State::__r12, &State::__r13, &State::__r14, &State::__r15};
+    auto& ss = ((ucontext_t*)ctx)->uc_mcontext->__ss;
+    ss.*regs[gpr_index & 15] = 0;
+    ss.__rip += length;
 #else
 #error "Unsupported architecture"
 #endif

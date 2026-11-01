@@ -17,6 +17,8 @@
 #include <unistd.h>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/mman.h>
 #else
 #include <sys/syscall.h>
 #include <sys/mman.h>
@@ -113,6 +115,26 @@ static void set_gs(void *base) {
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
+#elif defined(__APPLE__)
+/* macos: %gs is the pthread TSD base (tsd[key] at gs:[8*key]), so the guest TCB is the value
+ * of one pthread key and the loader rewrites the load to `mov rax, gs:[8*key]`, as on Windows. */
+static pthread_key_t tcb_key;
+static int tcb_key_ready;
+uint32_t runtime_thread_tcb_offset(void) {
+    if (!tcb_key_ready) {
+        if (pthread_key_create(&tcb_key,NULL)) { perror("STOP: pthread_key_create"); exit(21); }
+        if ((uint64_t)tcb_key>=UINT64_C(0x10000000)) { fprintf(stderr,"STOP: pthread key %lu out of disp32 reach\n",(unsigned long)tcb_key); exit(21); }
+        tcb_key_ready=1;
+    }
+    return (uint32_t)(8*tcb_key);
+}
+static void set_gs(void *base) {
+    runtime_thread_tcb_offset();
+    if (pthread_setspecific(tcb_key,base)) { perror("STOP: pthread_setspecific"); exit(21); }
+}
+/* macos: guest-visible host objects below 1 TiB (the guest packs pointers into 40 bits; Darwin's
+ * malloc hands out 0x6000'0000'0000-range addresses). Never freed, like the Linux heap blocks. */
+#define tls_block_alloc(size) runtime_low_map(size,PROT_READ|PROT_WRITE)
 #else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
@@ -126,6 +148,9 @@ static void attach(GuestThread *t) {
     unsigned char *block=tls_block_alloc((total+63)&~(size_t)63);
     if (!block) { fputs("Cannot allocate guest TLS\n",stderr); exit(1); }
     memset(block,0,total);
+#ifdef __APPLE__
+    compat_mac_altstack(); /* macos: every thread that runs guest code gets the fault handler's stack */
+#endif
     if (tls_filesz) memcpy(block,tls_template,tls_filesz);
     uint64_t *tcb=(uint64_t *)(block+offset);
     static uint64_t dtv[3];
@@ -137,7 +162,11 @@ static void attach(GuestThread *t) {
     current=t;
 }
 static GuestThread *new_thread(void) {
+#ifdef __APPLE__
+    GuestThread *t=runtime_low_map(sizeof(*t),PROT_READ|PROT_WRITE); /* macos: below 1 TiB, see tls_block_alloc */
+#else
     GuestThread *t=calloc(1,sizeof(*t));
+#endif
     if (!t) return NULL;
     t->attr=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.stack=DEFAULT_STACK,.affinity=0x7f};
     return t;

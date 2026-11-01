@@ -34,6 +34,7 @@ copied to <user>/crashes).
 import hashlib
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -60,15 +61,18 @@ def load_ini():
 
 def no_console():
     """Started without a console (the launcher): console programs must not open their own."""
+    if os.name != 'nt':
+        return 0
     import ctypes
     return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
 
 
 def find_probe():
-    for candidate in (PORT / 'bin' / 'bb-probe.exe', PORT / 'out' / 'bb-probe.exe'):
+    name = 'bb-probe.exe' if os.name == 'nt' else 'bb-probe'
+    for candidate in (PORT / 'bin' / name, PORT / 'out' / name):
         if candidate.is_file():
             return candidate
-    fail('bb-probe.exe not found: build it with build.sh (MSYS2 CLANG64) or use a packaged build.')
+    fail(f'{name} not found: build it with build.sh (MSYS2 CLANG64 on Windows) or use a packaged build.')
 
 
 def run_script(name, *args):
@@ -127,6 +131,11 @@ def merged_source(game, update, out):
 def main():
     load_ini()
     env = os.environ
+    if sys.platform == 'darwin':
+        # macos (Rosetta 2): windowed with a free cursor is bb-probe's default there; the output is
+        # sized for a laptop screen. An in-game restart (new render resolution) runs this again.
+        env.setdefault('SOTC_OUTPUT_RES', '1280x720')
+        env.setdefault('BB_RESTART_COMMAND', shlex.join([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]))
     os.chdir(PORT)
     out = PORT / 'out'
     out.mkdir(exist_ok=True)

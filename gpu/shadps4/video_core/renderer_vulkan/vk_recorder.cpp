@@ -10,6 +10,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <pthread.h> // macos: pthread_threadid_np
 #else
 #include <unistd.h>
 #endif
@@ -41,6 +43,10 @@ CommandRecorder* g_recorder{};
 u32 CurrentThreadId() {
 #ifdef _WIN32
     return static_cast<u32>(GetCurrentThreadId());
+#elif defined(__APPLE__)
+    u64 id = 0; // macos: no gettid()
+    pthread_threadid_np(nullptr, &id);
+    return static_cast<u32>(id);
 #else
     return static_cast<u32>(gettid());
 #endif

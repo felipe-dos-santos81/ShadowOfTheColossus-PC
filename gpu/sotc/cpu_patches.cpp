@@ -6,12 +6,14 @@
 #include <atomic>
 #include <bitset>
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 #include <Zydis/Zydis.h>
@@ -515,6 +517,231 @@ static void ReplaceMOVNTSD(void* address, const ZydisDecodedOperand*, Xbyak::Cod
     ReplaceMOVNT(address, 0xF2);
 }
 
+#if defined(__APPLE__)
+// macos: Rosetta 2 workarounds, from upstream shadPS4 src/core/cpu_patches.cpp (adapted to this
+// file's generator signature: the instruction is decoded again for its length).
+static std::atomic<u64> rosetta_vcmpss_patched{0}, rosetta_vmaskmov_patched{0};
+
+static ZydisDecodedInstruction DecodeAt(void* address) {
+    ZydisDecodedInstruction instruction;
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+    const auto status =
+        Common::Decoder::Instance()->decodeInstruction(instruction, operands, address);
+    ASSERT_MSG(ZYAN_SUCCESS(status), "Failed to decode instruction at {}", fmt::ptr(address));
+    return instruction;
+}
+
+/// A memory operand moved to a trampoline: RIP-relative addresses keep their absolute target.
+static Xbyak::Address RelocatedMemoryOperand(void* address, const ZydisDecodedInstruction& instruction,
+                                             const ZydisDecodedOperand& operand) {
+    if (operand.mem.base == ZYDIS_REGISTER_RIP) {
+        ZyanU64 target{};
+        ASSERT(ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instruction, &operand,
+                                                     reinterpret_cast<ZyanU64>(address), &target)));
+        return ptr[rip + reinterpret_cast<const void*>(target)];
+    }
+    return ZydisToXbyakMemoryOperand(operand);
+}
+
+// Rosetta 2 mistranslates VCMPSS with NEQ, NLT or NLE: if the destination is then reloaded by a
+// full width VEX load, later scalar reads of it still return the compare mask.
+static bool FilterNegatedScalarCompare(const ZydisDecodedOperand* operands) {
+    // NEQ, NLT and NLE are 4 to 6, and 20 to 22 are the same predicates with bit 4 set.
+    const u64 predicate = operands[3].imm.value.u & ~0x10ULL;
+    return predicate >= 4 && predicate <= 6;
+}
+
+// Compares with the non-negated predicate and flips lane 0, which gives the same bits.
+static void GenerateNegatedScalarCompare(void* address, const ZydisDecodedOperand* operands,
+                                         Xbyak::CodeGenerator& c) {
+    const auto dst = ZydisToXbyakRegisterOperand(operands[0]);
+    const auto src1 = ZydisToXbyakRegisterOperand(operands[1]);
+    const auto& xmm_dst = *reinterpret_cast<const Xbyak::Xmm*>(&dst);
+    const auto& xmm_src1 = *reinterpret_cast<const Xbyak::Xmm*>(&src1);
+    const u8 predicate = operands[3].imm.value.u & 3;
+    if (operands[2].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        c.vcmpss(xmm_dst, xmm_src1, ZydisToXbyakRegisterOperand(operands[2]), predicate);
+    } else {
+        c.vcmpss(xmm_dst, xmm_src1, RelocatedMemoryOperand(address, DecodeAt(address), operands[2]),
+                 predicate);
+    }
+    Xbyak::Label lane0_mask, done;
+    c.vxorps(xmm_dst, xmm_dst, ptr[rip + lane0_mask]);
+    c.jmp(done);
+    c.L(lane0_mask);
+    c.dq(0xFFFFFFFF);
+    c.dq(0);
+    c.L(done);
+    rosetta_vcmpss_patched.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Rosetta 2 crashes on page faults during VMASKMOVPS/PD execution because
+// EmulateForward is unimplemented.
+static bool FilterRosetta(const ZydisDecodedOperand*) {
+    return true;
+}
+
+static std::tuple<Xbyak::Reg64, Xbyak::Reg64, Xbyak::Reg64> PickScratchRegisters(
+    const ZydisDecodedOperand& mem_op) {
+    auto GetIdx = [](ZydisRegister reg) {
+        if (reg >= ZYDIS_REGISTER_EAX && reg <= ZYDIS_REGISTER_R15D)
+            return reg - ZYDIS_REGISTER_EAX;
+        if (reg >= ZYDIS_REGISTER_RAX && reg <= ZYDIS_REGISTER_R15)
+            return reg - ZYDIS_REGISTER_RAX;
+        return -1;
+    };
+    const int b = GetIdx(mem_op.mem.base);
+    const int i = GetIdx(mem_op.mem.index);
+
+    std::array<Xbyak::Reg64, 3> picked{rax, rcx, rdx};
+    int count = 0;
+    for (const auto& reg : {rax, rcx, rdx, rsi, rdi}) {
+        if (reg.getIdx() != b && reg.getIdx() != i) {
+            picked[count++] = reg;
+            if (count == 3)
+                break;
+        }
+    }
+    return {picked[0], picked[1], picked[2]};
+}
+
+static void GenerateVMASKMOV(void* address, const ZydisDecodedOperand* operands,
+                             Xbyak::CodeGenerator& c) {
+    const ZydisDecodedInstruction instruction = DecodeAt(address);
+    const bool is_double = (instruction.mnemonic == ZYDIS_MNEMONIC_VMASKMOVPD);
+    const bool is_store = (operands[0].type == ZYDIS_OPERAND_TYPE_MEMORY);
+
+    const auto& mem_op = is_store ? operands[0] : operands[2];
+    const auto& mask_op = operands[1];
+    const auto& reg_op = is_store ? operands[2] : operands[0];
+
+    ASSERT_MSG(mem_op.type == ZYDIS_OPERAND_TYPE_MEMORY, "Expected memory operand");
+    ASSERT_MSG(mask_op.type == ZYDIS_OPERAND_TYPE_REGISTER, "Expected mask register operand");
+    ASSERT_MSG(reg_op.type == ZYDIS_OPERAND_TYPE_REGISTER, "Expected src/dst register operand");
+
+    const auto raw_mask = ZydisToXbyakRegisterOperand(mask_op);
+    const auto raw_reg = ZydisToXbyakRegisterOperand(reg_op);
+
+    const bool is_ymm = raw_mask.isYMM() || raw_reg.isYMM();
+    const int lanes = is_double ? 2 : 4;
+    const int elem_size = is_double ? 8 : 4;
+    const int num_elements = lanes * (is_ymm ? 2 : 1);
+
+    const Xbyak::Xmm xmm_mask(raw_mask.getIdx());
+    const Xbyak::Ymm ymm_mask(raw_mask.getIdx());
+    const Xbyak::Xmm xmm_reg(raw_reg.getIdx());
+    const Xbyak::Ymm ymm_reg(raw_reg.getIdx());
+
+    auto [scratch_addr, scratch_mask, scratch_data] = PickScratchRegisters(mem_op);
+
+    // 128 bytes Red Zone + 32 bytes vector buffer
+    const u32 stack_space = 128 + 32;
+    c.lea(rsp, ptr[rsp - stack_space]);
+    c.pushfq();
+    c.push(scratch_addr);
+    c.push(scratch_mask);
+    c.push(scratch_data);
+
+    const u32 rsp_offset = stack_space + 8 * 4;
+
+    if (mem_op.mem.base == ZYDIS_REGISTER_RIP) {
+        const u64 target =
+            reinterpret_cast<u64>(address) + instruction.length + mem_op.mem.disp.value;
+        c.mov(scratch_addr, target);
+    } else {
+        ZydisDecodedOperand op = mem_op;
+        if (op.mem.base == ZYDIS_REGISTER_RSP) {
+            op.mem.disp.has_displacement = true; // Zydis 4.0
+            op.mem.disp.value += rsp_offset;
+        }
+        c.lea(scratch_addr, ZydisToXbyakMemoryOperand(op));
+    }
+
+    if (is_double) {
+        is_ymm ? c.vmovmskpd(scratch_mask.cvt32(), ymm_mask)
+               : c.vmovmskpd(scratch_mask.cvt32(), xmm_mask);
+    } else {
+        is_ymm ? c.vmovmskps(scratch_mask.cvt32(), ymm_mask)
+               : c.vmovmskps(scratch_mask.cvt32(), xmm_mask);
+    }
+
+    Xbyak::Label done;
+
+    if (is_store) {
+        if (is_ymm) {
+            c.vmovups(ptr[rsp + 32], ymm_reg);
+        } else {
+            c.vmovups(ptr[rsp + 32], xmm_reg);
+        }
+
+        c.test(scratch_mask.cvt32(), scratch_mask.cvt32());
+        c.jz(done);
+
+        for (int i = 0; i < num_elements; ++i) {
+            Xbyak::Label skip_elem;
+            c.test(scratch_mask.cvt32(), 1 << i);
+            c.jz(skip_elem);
+
+            const u32 offset = i * elem_size;
+            if (is_double) {
+                c.mov(scratch_data, ptr[rsp + 32 + offset]);
+                c.mov(ptr[scratch_addr + offset], scratch_data);
+            } else {
+                c.mov(scratch_data.cvt32(), ptr[rsp + 32 + offset]);
+                c.mov(ptr[scratch_addr + offset], scratch_data.cvt32());
+            }
+            c.L(skip_elem);
+        }
+    } else {
+        // Load: zero buffer using dst register (which will be overwritten anyway)
+        if (is_ymm) {
+            c.vxorps(ymm_reg, ymm_reg, ymm_reg);
+            c.vmovups(ptr[rsp + 32], ymm_reg);
+        } else {
+            c.vxorps(xmm_reg, xmm_reg, xmm_reg);
+            c.vmovups(ptr[rsp + 32], xmm_reg);
+        }
+
+        c.test(scratch_mask.cvt32(), scratch_mask.cvt32());
+        c.jz(done);
+
+        for (int i = 0; i < num_elements; ++i) {
+            Xbyak::Label skip_elem;
+            c.test(scratch_mask.cvt32(), 1 << i);
+            c.jz(skip_elem);
+
+            const u32 offset = i * elem_size;
+            if (is_double) {
+                c.mov(scratch_data, ptr[scratch_addr + offset]);
+                c.mov(ptr[rsp + 32 + offset], scratch_data);
+            } else {
+                c.mov(scratch_data.cvt32(), ptr[scratch_addr + offset]);
+                c.mov(ptr[rsp + 32 + offset], scratch_data.cvt32());
+            }
+            c.L(skip_elem);
+        }
+
+        c.L(done);
+        if (is_ymm) {
+            c.vmovups(ymm_reg, ptr[rsp + 32]);
+        } else {
+            c.vmovups(xmm_reg, ptr[rsp + 32]);
+        }
+    }
+
+    if (is_store) {
+        c.L(done);
+    }
+
+    c.pop(scratch_data);
+    c.pop(scratch_mask);
+    c.pop(scratch_addr);
+    c.popfq();
+    c.lea(rsp, ptr[rsp + stack_space]);
+    rosetta_vmaskmov_patched.fetch_add(1, std::memory_order_relaxed);
+}
+#endif
+
 using PatchFilter = bool (*)(const ZydisDecodedOperand*);
 using InstructionGenerator = void (*)(void*, const ZydisDecodedOperand*, Xbyak::CodeGenerator&);
 struct PatchInfo {
@@ -542,6 +769,13 @@ static const std::unordered_map<ZydisMnemonic, std::vector<PatchInfo>> Patches =
     {ZYDIS_MNEMONIC_INSERTQ, {{FilterNoSSE4a, GenerateINSERTQ, true}}},
     {ZYDIS_MNEMONIC_MOVNTSS, {{FilterNoSSE4a, ReplaceMOVNTSS, false}}},
     {ZYDIS_MNEMONIC_MOVNTSD, {{FilterNoSSE4a, ReplaceMOVNTSD, false}}},
+
+#if defined(__APPLE__)
+    // macos: Rosetta 2 (see GenerateNegatedScalarCompare, GenerateVMASKMOV)
+    {ZYDIS_MNEMONIC_VCMPSS, {{FilterNegatedScalarCompare, GenerateNegatedScalarCompare, true}}},
+    {ZYDIS_MNEMONIC_VMASKMOVPS, {{FilterRosetta, GenerateVMASKMOV, true}}},
+    {ZYDIS_MNEMONIC_VMASKMOVPD, {{FilterRosetta, GenerateVMASKMOV, true}}},
+#endif
 
 #if 0 // sotc: the loader already redirects `mov reg, fs:[0]` to the TEB TLS slot
     // FS segment patches
@@ -945,7 +1179,10 @@ bool IsStaticPatchingEnabled() noexcept {
 
 } // namespace WindowsGuestRedZoneProtection
 
-#if defined(_WIN32)
+// macos: the function decoder and the short SSE4a relocation are also used on macOS (Rosetta 2
+// has no SSE4a). The red-zone and rdtsc patchers stay Windows-only: Darwin signal frames skip
+// the red zone (and go to a sigaltstack) and the TSC frequency is calibrated there.
+#if defined(_WIN32) || defined(__APPLE__)
 
 namespace {
 
@@ -1597,6 +1834,7 @@ const PatchInfo* FindMatchingPatch(const DecodedCodeInstruction& decoded) {
 
 } // namespace
 
+#if defined(_WIN32) // macos: red-zone patcher Windows-only
 RedZonePatchResult PatchRedZoneMemoryInstructions(u64 segment_addr, u64 segment_size,
                                                   std::span<const uintptr_t> function_starts,
                                                   std::span<const uintptr_t> selected_addresses) {
@@ -2125,6 +2363,7 @@ RedZonePatchResult PatchRedZoneMemoryInstructions(u64 segment_addr, u64 segment_
     }
     return result;
 }
+#endif // _WIN32
 
 bool NeedsSse4aEmulation() {
     Cpu cpu;
@@ -2265,6 +2504,7 @@ u64 PatchShortSse4aInstructions(u64 segment_addr, u64 segment_size,
     return patched_count;
 }
 
+#if defined(_WIN32) // macos: rdtsc patcher Windows-only
 // sotc: rdtsc reads `clock` (host Win64 ABI) instead. The 2-byte rdtsc and the instructions
 // after it move to a trampoline that steps over the guest red zone, keeps every register the
 // host call may clobber (flags and xmm0-5 included) and returns the value in edx:eax as rdtsc.
@@ -2429,8 +2669,11 @@ u64 PatchRdtscInstructions(u64 segment_addr, u64 segment_size,
     }
     return patched_count;
 }
+#endif // _WIN32
 
-#else
+#endif // _WIN32 || __APPLE__
+
+#if !defined(_WIN32)
 
 RedZonePatchResult PatchRedZoneMemoryInstructions(u64, u64, std::span<const uintptr_t>,
                                                   std::span<const uintptr_t>) {
@@ -2441,6 +2684,10 @@ u64 PatchRdtscInstructions(u64, u64, std::span<const uintptr_t>, void*, u64* unp
     *unpatched = 0;
     return 0;
 }
+
+#endif
+
+#if !defined(_WIN32) && !defined(__APPLE__)
 
 bool NeedsSse4aEmulation() {
     return false;
@@ -2520,13 +2767,17 @@ void RegisterPatchModule(void* module_ptr, u64 module_size, void* trampoline_are
 }
 
 void PrePatchInstructions(u64 segment_addr, u64 segment_size) {
-#if !defined(__APPLE__)
+    // macos: also on macOS (the loader maps the eboot writable, as on Windows).
     // sotc: also on Windows. Only CPU patches are left in the table, and patching them ahead
     // of time keeps every long EXTRQ/INSERTQ from going through an exception (which clobbers
     // the guest red zone on Windows) on its first execution.
     if (!Patches.empty()) {
         TryPatchAot(reinterpret_cast<void*>(segment_addr), segment_size);
     }
+#if defined(__APPLE__)
+    std::fprintf(stderr, "SOTC Rosetta patches (so far): %llu vcmpss (negated), %llu vmaskmov\n",
+                 static_cast<unsigned long long>(rosetta_vcmpss_patched.load()),
+                 static_cast<unsigned long long>(rosetta_vmaskmov_patched.load()));
 #endif
 }
 

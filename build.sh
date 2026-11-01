@@ -2,6 +2,19 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
 mkdir -p out
+# Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
+# to FSR-Vulkan (gpu/patches/fsr-vulkan), applied to its working tree once.
+submodules() {
+    if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
+          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
+        git submodule update --init --recursive
+    fi
+    for patch in gpu/patches/fsr-vulkan/*.patch; do
+        if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+            git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
+        fi
+    done
+}
 # Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
 # there and CMake links bb-probe.exe as well. ThinLTO by default (BB_LTO=OFF disables it);
 # Clang PGO from pgo/bbgpu.profdata when present (tools/pgo_train.sh makes it).
@@ -12,15 +25,7 @@ MINGW*|MSYS*)
     for tool in clang cmake ninja pkg-config; do
         command -v "$tool" >/dev/null || { echo "Need $tool from MSYS2 CLANG64 (packaging/windows/README.md)." >&2; exit 1; }
     done
-    if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
-          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
-        git submodule update --init --recursive
-    fi
-    for patch in gpu/patches/fsr-vulkan/*.patch; do
-        if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
-            git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
-        fi
-    done
+    submodules
     # sotc: llvm-windres, binutils windres fails on build paths with spaces ("Unable to create
     # temp file").
     # sotc: BB_PGO=generate builds an instrumented exe (Clang profile in pgo/, see
@@ -40,6 +45,35 @@ MINGW*|MSYS*)
     fi
     cp out/gpu/bb-probe.exe out/gpu/bb-gpu-capabilities.exe out/
     echo "Built $PWD/out/bb-probe.exe"
+    exit 0
+    ;;
+Darwin)
+    # macos: x86_64 build run by Rosetta 2 on Apple Silicon (the guest's x86-64 code runs in
+    # process). Dependencies: tools/macos_deps.sh (out/deps-x86_64, incl. the KosmicKrisp Vulkan
+    # driver); Vulkan headers and loader from the LunarG SDK; host tools from Homebrew. Like
+    # Windows, bbgpu is static and CMake links bb-probe. PGO off: the profile is Windows'.
+    for tool in cmake ninja meson pkg-config; do
+        command -v "$tool" >/dev/null || { echo "Need $tool (brew install cmake ninja meson pkg-config nasm llvm spirv-llvm-translator)." >&2; exit 1; }
+    done
+    export VULKAN_SDK=${VULKAN_SDK:-$(ls -d "$HOME"/VulkanSDK/*/macOS 2>/dev/null | sort -V | tail -1)}
+    [[ -d $VULKAN_SDK/include/vulkan ]] || { echo 'Need the LunarG Vulkan SDK (VULKAN_SDK=<sdk>/macOS).' >&2; exit 1; }
+    submodules
+    bash tools/macos_deps.sh
+    deps=$PWD/out/deps-x86_64
+    PKG_CONFIG_LIBDIR=$deps/lib/pkgconfig PATH=/usr/bin:$PATH cmake -S gpu -B out/gpu -G Ninja \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off -DBB_LTO="${BB_LTO:-ON}" \
+        -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+        -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+        -DCMAKE_PREFIX_PATH="$deps;$VULKAN_SDK" -DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew \
+        -DPKG_CONFIG_EXECUTABLE="$(command -v pkg-config)" -DGLSLANG_COMPILER="$VULKAN_SDK/bin/glslang" \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
+    echo "GPU library and loader (macOS x86_64): LTO ${BB_LTO:-ON}"
+    if ! ninja -C out/gpu bb-probe > out/gpu-build.log 2>&1; then
+        grep -v '^\[' out/gpu-build.log | tail -40 >&2
+        echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
+    fi
+    cp out/gpu/bb-probe out/gpu/libvulkan.dylib out/gpu/libvulkan_kosmickrisp.dylib out/gpu/kosmickrisp_mesa_icd.json out/
+    echo "Built $PWD/out/bb-probe"
     exit 0
     ;;
 esac
@@ -70,16 +104,7 @@ if [[ -z $pgo ]]; then
     if [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
 fi
 mkdir -p pgo
-# Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
-# to FSR-Vulkan (gpu/patches/fsr-vulkan), applied to its working tree once.
-if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
-    git submodule update --init --recursive
-fi
-for patch in gpu/patches/fsr-vulkan/*.patch; do
-    if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
-        git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
-    fi
-done
+submodules
 cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
     -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" >/dev/null
 echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"

@@ -675,7 +675,7 @@ u64 BufferCache::GatherDownloads(const Buffer* arena, VAddr device_addr, u64 siz
                     }
                 };
                 for (VAddr page = address; page < range_end;) {
-                    const VAddr next = std::min(Common::AlignDown(page, 4_KB) + 4_KB, range_end);
+                    const VAddr next = std::min<VAddr>(Common::AlignDown(page, 4_KB) + 4_KB, range_end); // macos: <VAddr>
                     if (memory_tracker->IsRegionCpuModified(page, next - page)) {
                         flush_run(page);
                         run_start = next;
@@ -1408,7 +1408,7 @@ void BufferCache::SynchronizeDmaBuffers() {
                 VAddr hi = 0;
                 for (size_t k = s; k < dma_spans.size() && dma_spans[k].first < run_end; ++k) {
                     lo = std::min(lo, std::max(run_start, dma_spans[k].first));
-                    hi = std::max(hi, std::min(run_end, dma_spans[k].first + dma_spans[k].second));
+                    hi = std::max(hi, std::min<VAddr>(run_end, dma_spans[k].first + dma_spans[k].second)); // macos: <VAddr>
                 }
                 if (lo < hi) {
                     SynchronizeMemory(address_space[run_start >> ARENA_PAGE_BITS], lo,

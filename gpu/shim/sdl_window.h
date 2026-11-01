@@ -50,6 +50,7 @@ private:
     void UpdateTitleStats();
     void UpdateTextTitle();
     SDL_Window* window{};
+    void* metal_view{}; ///< macos: SDL_MetalView backing the Vulkan surface
     WindowSystemInfo window_info{};
 };
 

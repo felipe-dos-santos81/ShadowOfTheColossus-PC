@@ -1,4 +1,5 @@
-// bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+// bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland; Win32; macos: Cocoa/Metal).
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +43,47 @@ bool MouseEnabled() {
     }();
     return enabled;
 }
+// macos: SOTC_MOUSE_CAPTURE=0 never captures, hides or confines the cursor: the buttons reach
+// their pad bindings while the window has the focus, and the motion turns the camera only while
+// the look button (SOTC_MOUSE_LOOK_BUTTON=left|right|middle|x1|x2, default left) is held.
+// Default 1 (click to capture, as before) except on macOS.
+bool MouseCapture() {
+    static const bool capture = [] {
+        const char* v = std::getenv("SOTC_MOUSE_CAPTURE");
+#ifdef __APPLE__
+        return v && v[0] == '1';
+#else
+        return !v || v[0] != '0';
+#endif
+    }();
+    return capture;
+}
+struct LookButtonEntry {
+    const char* name;
+    int button;
+};
+// SOTC_MOUSE_LOOK_BUTTON (left, the default; right, middle, x1, x2: the mouse.<input> names).
+const LookButtonEntry& LookButtonSetting() {
+    static constexpr LookButtonEntry buttons[] = {{"left", SDL_BUTTON_LEFT},
+                                                  {"right", SDL_BUTTON_RIGHT},
+                                                  {"middle", SDL_BUTTON_MIDDLE},
+                                                  {"x1", SDL_BUTTON_X1},
+                                                  {"x2", SDL_BUTTON_X2}};
+    static const LookButtonEntry& entry = [&]() -> const LookButtonEntry& {
+        const char* v = std::getenv("SOTC_MOUSE_LOOK_BUTTON");
+        for (const auto& b : buttons) {
+            if (v && !std::strcmp(v, b.name)) return b;
+        }
+        return buttons[0];
+    }();
+    return entry;
+}
+int LookButton() {
+    return LookButtonSetting().button;
+}
+const char* LookButtonName() {
+    return LookButtonSetting().name;
+}
 void AddMotion(std::atomic<float>& total, float delta) {
     float old = total.load(std::memory_order_relaxed);
     while (!total.compare_exchange_weak(old, old + delta, std::memory_order_relaxed)) {
@@ -74,6 +116,16 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
+#ifdef __APPLE__
+    // macos: never larger than 90% of the usable area (no menu bar or Dock), like the loader
+    // does on Windows; here because SDL video must start on the main thread.
+    if (SDL_Rect usable{}; SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) &&
+                           (width_ > usable.w * 9 / 10 || height_ > usable.h * 9 / 10)) {
+        const double scale = std::min(usable.w * 0.9 / width_, usable.h * 0.9 / height_);
+        width = width_ = static_cast<s32>(width_ * scale);
+        height = height_ = static_cast<s32>(height_ * scale);
+    }
+#endif
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
@@ -81,7 +133,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+#ifdef __APPLE__
+    // macos: a Metal view backs the Vulkan surface (VK_EXT_metal_surface); with the VULKAN flag
+    // SDL would load a Vulkan loader of its own.
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN, true);
+#else
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+#endif
     const char* fullscreen = std::getenv("BB_FULLSCREEN");
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen && fullscreen[0] == '1');
     // sotc: SOTC_WINDOW_BEHIND=1 (unattended benchmarks): the window opens without taking the
@@ -142,8 +200,25 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
         window_info.type = WindowSystemType::Wayland;
         window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr);
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
-    } else {
+    }
+#ifdef __APPLE__
+    else if (driver && !std::strcmp(driver, "cocoa")) { // macos
+        metal_view = SDL_Metal_CreateView(window);
+        ASSERT_MSG(metal_view, "Failed to create the Metal view: {}", SDL_GetError());
+        window_info.type = WindowSystemType::Metal;
+        window_info.render_surface = SDL_Metal_GetLayer(metal_view);
+    }
+#endif
+    else {
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
+    }
+    if (MouseEnabled()) {
+        if (MouseCapture()) {
+            std::fprintf(stderr, "Runtime: mouse capture on (a click captures it, Esc releases it)\n");
+        } else {
+            std::fprintf(stderr, "Runtime: mouse capture off (cursor stays free; hold the %s "
+                                 "button and drag to look)\n", LookButtonName());
+        }
     }
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
@@ -153,6 +228,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 }
 
 WindowSDL::~WindowSDL() {
+#ifdef __APPLE__
+    if (metal_view) {
+        SDL_Metal_DestroyView(metal_view); // macos: before the window
+    }
+#endif
     SDL_DestroyWindow(window);
 }
 
@@ -210,7 +290,18 @@ bool WindowSDL::PollEvents() {
     // sotc: while the in-game menu (or the save list, the text box) is open the mouse is free and
     // visible, so the menu can be clicked; it was left in the camera's relative mode, hidden and
     // held at the window centre. Closing the menu captures it again for the camera.
-    {
+    if (!MouseCapture()) {
+        // macos: free cursor. "Captured" means the mouse feeds the pad: the window has the
+        // focus and the menu does not take the input.
+        const bool active = MouseEnabled() && !BbOverlay::CapturesInput() &&
+                            (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS);
+        if (!active && g_mouse_captured) {
+            g_mouse_buttons = 0;
+            g_mouse_dx = 0;
+            g_mouse_dy = 0;
+        }
+        g_mouse_captured = active;
+    } else {
         static bool released_for_menu = false;
         const bool menu = BbOverlay::CapturesInput();
         if (menu && g_mouse_captured) {
@@ -280,7 +371,26 @@ bool WindowSDL::PollEvents() {
                 std::fprintf(stderr, "SOTC mouse debug: event 0x%x\n", event.type);
             }
         }
-        if (MouseEnabled()) {
+        if (MouseEnabled() && !MouseCapture()) {
+            // macos: free cursor (see MouseCapture). Releases always count, so no button sticks.
+            const bool active = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) &&
+                                !BbOverlay::CapturesInput();
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && active) {
+                g_mouse_buttons |= 1u << event.button.button;
+                g_mouse_captured = true;
+            } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                g_mouse_buttons &= ~(1u << event.button.button);
+            } else if (event.type == SDL_EVENT_MOUSE_MOTION && active &&
+                       (event.motion.state & SDL_BUTTON_MASK(LookButton()))) {
+                AddMotion(g_mouse_dx, event.motion.xrel);
+                AddMotion(g_mouse_dy, event.motion.yrel);
+            } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                g_mouse_captured = false;
+                g_mouse_buttons = 0;
+                g_mouse_dx = 0;
+                g_mouse_dy = 0;
+            }
+        } else if (MouseEnabled()) {
             const auto capture = [this](bool on) {
                 SDL_SetWindowRelativeMouseMode(window, on);
                 g_mouse_captured = on;
@@ -358,7 +468,8 @@ bool WindowSDL::IsFullscreen() const {
 } // namespace Frontend
 
 // sotc: motion since the last call, the held buttons (bit = SDL button number); 0 while the
-// mouse is not captured.
+// mouse is not captured (macos: with SOTC_MOUSE_CAPTURE=0, while the window lacks the focus or
+// the menu has the input).
 extern "C" int bbgpu_mouse_take(float* dx, float* dy, unsigned* buttons) {
     const auto& s = BbSettings::Get();
     if (!s.mouse_enabled.load(std::memory_order_relaxed)) {

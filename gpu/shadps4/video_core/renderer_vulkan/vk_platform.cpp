@@ -205,6 +205,11 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
+#ifdef __APPLE__
+    // macos: harmless when present; lists portability drivers too (dropped below if missing).
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
+
     // Sanitize extension list
     std::erase_if(extensions, [&](const char* extension) -> bool {
         const auto it =
@@ -271,7 +276,16 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
 #endif
 
+#if defined(__APPLE__)
+    // macos: the universal libvulkan.dylib next to the executable, else the default search.
+    static vk::detail::DynamicLoader dl{[] {
+        const auto loader = icd_path / "libvulkan.dylib";
+        std::error_code ec;
+        return std::filesystem::exists(loader, ec) ? loader.string() : std::string{};
+    }()};
+#else
     static vk::detail::DynamicLoader dl;
+#endif
     // sotc: SOTC_DLSSG=1 loads Vulkan through Streamline's interposer (DLSS Frame Generation).
     PFN_vkGetInstanceProcAddr get_instance_proc_addr = Dlssg::LoadInterposer();
     if (!get_instance_proc_addr) {
@@ -407,6 +421,16 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 
     vk::StructureChain<vk::InstanceCreateInfo, vk::LayerSettingsCreateInfoEXT> instance_ci_chain = {
         vk::InstanceCreateInfo{
+#ifdef __APPLE__ // macos: portability drivers are listed only with this flag
+            .flags = std::ranges::any_of(extensions,
+                                         [](const char* e) {
+                                             return std::strcmp(
+                                                        e,
+                                                        VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
+                                         })
+                         ? vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR
+                         : vk::InstanceCreateFlags{},
+#endif
             .pApplicationInfo = &application_info,
             .enabledLayerCount = static_cast<u32>(layers.size()),
             .ppEnabledLayerNames = layers.data(),

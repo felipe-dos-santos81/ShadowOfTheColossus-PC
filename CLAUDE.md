@@ -82,7 +82,7 @@ letters differ per executable). To add a missing system function, implement it i
 **GPU library** (`gpu/`, C++, static `libbbgpu.a` on Windows, C API in `gpu/bbgpu.h`):
 - `gpu/shadps4/` — vendored shadPS4 (`video_core`, `shader_recompiler`, `common`, parts of `core`);
   commit and backports listed in `gpu/VENDOR.txt`. Local edits are marked with `bbport:` or
-  `sotc:` comments — keep marking them. Most rendering bugs (water, AMD tint, garbage textures)
+  `sotc:` comments (`macos:` for the Apple Silicon port) — keep marking them. Most rendering bugs (water, AMD tint, garbage textures)
   are fixed in `shader_recompiler` (GCN instruction translation) or `video_core/renderer_vulkan`.
 - `gpu/shim/` — glue replacing shadPS4's emulator core: settings (`bbport_settings.cpp`, reads
   `BB_*`/`SOTC_*` env and `BB_CONFIG`), window/SDL, overlay, threads.

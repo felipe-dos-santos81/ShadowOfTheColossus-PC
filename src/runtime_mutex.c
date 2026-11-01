@@ -94,7 +94,14 @@ static ABI int32_t mutex_lock(GuestMutex **mutex) {
         struct timespec slice;
         clock_gettime(CLOCK_REALTIME, &slice);
         slice.tv_sec += 5;
+#ifdef __APPLE__
+        /* macos: Darwin's timed lock is a polling loop (compat_mac.c): block instead, without
+         * the 5 s wait reports. */
+        (void)slice;
+        native = pthread_mutex_lock(&m->native);
+#else
         native = pthread_mutex_timedlock(&m->native, &slice);
+#endif
         if (native == ETIMEDOUT) {
             native = EBUSY;
             if (waited++ < 3)

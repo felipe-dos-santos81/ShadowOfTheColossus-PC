@@ -52,6 +52,15 @@ static std::filesystem::path DriverCachePath() {
     return dir / "sotc_vk_pipelines.bin";
 }
 
+// macos: _wfopen is Windows-only; native paths are narrow elsewhere.
+static std::FILE* OpenDriverCache(const std::filesystem::path& path, bool write) {
+#ifdef _WIN32
+    return _wfopen(path.c_str(), write ? L"wb" : L"rb");
+#else
+    return std::fopen(path.c_str(), write ? "wb" : "rb");
+#endif
+}
+
 using Shader::HwStage;
 using Shader::Output;
 using Shader::SwStage;
@@ -456,7 +465,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     std::vector<u8> driver_cache_data;
     if (DriverCacheEnabled()) {
         const auto path = DriverCachePath();
-        if (std::FILE* f = _wfopen(path.c_str(), L"rb")) {
+        if (std::FILE* f = OpenDriverCache(path, false)) {
             std::fseek(f, 0, SEEK_END);
             const long size = std::ftell(f);
             std::fseek(f, 0, SEEK_SET);
@@ -551,7 +560,7 @@ void PipelineCache::SaveDriverCache() {
     const auto path = DriverCachePath();
     auto tmp = path;
     tmp += L".tmp";
-    std::FILE* f = _wfopen(tmp.c_str(), L"wb");
+    std::FILE* f = OpenDriverCache(tmp, true);
     if (!f) {
         return;
     }

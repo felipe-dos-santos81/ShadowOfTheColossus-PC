@@ -22,6 +22,10 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sched.h>
+#include <os/os_sync_wait_on_address.h>
+#endif
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
  * patches above 1080p need about 4 GiB more; run.sh sets it). A PS4 Pro (SOTC_NEO=1) gives games
@@ -44,7 +48,11 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
+#ifdef __APPLE__
+#define USER_MIN COMPAT_MAC_USER_MIN /* macos: Metal reserves 0x1000000000-0x6fffffffff in Rosetta processes */
+#else
 #define USER_MIN UINT64_C(0x1000000000)
+#endif
 #define USER_MAX UINT64_C(0xfc00000000)
 #define SYSTEM_LOW_MIN UINT64_C(0x0700000000)
 #define SYSTEM_LOW_MAX UINT64_C(0x0800000000)
@@ -208,11 +216,46 @@ void runtime_memory_lock_stats2(double *worst_hold_ms, uint64_t *read_waits, dou
     *read_wait_ms=(double)__atomic_exchange_n(&lock_read_wait_ticks,0,__ATOMIC_RELAXED)*ms;
 }
 #else
+#ifdef __APPLE__
+/* macos: Darwin's rwlock prefers writers too (a nested read waits behind a waiting writer, the
+ * deadlock described above for winpthreads), so the same reader-preferring lock: a read is one
+ * atomic operation; readers that find a writer sleep on the lock word until it lets go. */
+static int64_t lock_state; /* readers, or -1 while a writer holds it */
+static uint32_t lock_sleepers;
+static void rw_rdlock(void) {
+    for (unsigned spins=0;;++spins) {
+        int64_t s=__atomic_load_n(&lock_state,__ATOMIC_RELAXED);
+        if (s>=0 && __atomic_compare_exchange_n(&lock_state,&s,s+1,0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED)) return;
+        if (s>=0 || spins<64) { __builtin_ia32_pause(); continue; }
+        __atomic_add_fetch(&lock_sleepers,1,__ATOMIC_SEQ_CST);
+        /* 2 ms bound a missed wake, as on Windows */
+        os_sync_wait_on_address_with_timeout(&lock_state,(uint64_t)-1,8,OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                             OS_CLOCK_MACH_ABSOLUTE_TIME,2000000);
+        __atomic_sub_fetch(&lock_sleepers,1,__ATOMIC_SEQ_CST);
+    }
+}
+static void rw_rdunlock(void) { __atomic_sub_fetch(&lock_state,1,__ATOMIC_RELEASE); }
+static void rw_wrlock(void) {
+    for (unsigned spins=0;;++spins) {
+        int64_t s=0;
+        if (__atomic_compare_exchange_n(&lock_state,&s,-1,0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED)) return;
+        if (spins<64) __builtin_ia32_pause();
+        else if (spins<256) sched_yield();
+        else { const struct timespec t={0,100000}; nanosleep(&t,NULL); } /* maps and unmaps are rare */
+    }
+}
+static void rw_wrunlock(void) {
+    /* seq_cst: the store must not pass the load of lock_sleepers (see rw_rdlock) */
+    __atomic_store_n(&lock_state,0,__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&lock_sleepers,__ATOMIC_SEQ_CST)) os_sync_wake_by_address_all(&lock_state,8,OS_SYNC_WAKE_BY_ADDRESS_NONE);
+}
+#else
 static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
 static void rw_rdlock(void) { pthread_rwlock_rdlock(&lock); }
 static void rw_rdunlock(void) { pthread_rwlock_unlock(&lock); }
 static void rw_wrlock(void) { pthread_rwlock_wrlock(&lock); }
 static void rw_wrunlock(void) { pthread_rwlock_unlock(&lock); }
+#endif
 void runtime_memory_lock_stats(uint64_t *writes, double *wait_ms, double *hold_ms, double *worst_ms) {
     *writes=0; *wait_ms=*hold_ms=*worst_ms=0;
 }
@@ -222,6 +265,7 @@ void runtime_memory_lock_stats2(double *worst_hold_ms, uint64_t *read_waits, dou
 void runtime_memory_carve_stats(uint64_t *mib, uint64_t *runs, double *split_ms, double *worst_ms, double *other_ms) {
     *mib=*runs=0; *split_ms=*worst_ms=*other_ms=0;
 }
+uint64_t runtime_memory_carve_splits(void) { return 0; } /* no live view splits off Windows */
 void runtime_memory_lock_sites(char *readers, char *writers, size_t capacity) {
     if (capacity) readers[0]=writers[0]=0;
 }
@@ -572,25 +616,61 @@ static int pool(void) {
 static int pool(void) {
     if (pool_fd>=0) return 0;
     region_direct_init();
+#ifdef __APPLE__
+    /* macos: no memfd; an unlinked POSIX shared memory object. */
+    char name[32];
+    snprintf(name,sizeof(name),"/bb-guest-memory-%d",(int)getpid());
+    pool_fd=shm_open(name,O_RDWR|O_CREAT|O_EXCL,0600);
+    if (pool_fd>=0) { shm_unlink(name); fcntl(pool_fd,F_SETFD,FD_CLOEXEC); }
+#else
     pool_fd=memfd_create("bb-guest-memory", MFD_CLOEXEC);
+#endif
     if (pool_fd<0 || ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
     void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
     if (view==MAP_FAILED) return -1;
     backing_base=view;
     return 0;
 }
+#ifdef __APPLE__
+void runtime_memory_reserve(void) { compat_mac_reserve_guest(); }
+/* macos: a change count per page hash bucket, bumped by every host map, unmap and protection
+ * change: the loader's precise-readback helper (probe.c) restores a page it opened only if
+ * nothing changed it meanwhile (Windows asks VirtualQuery instead). */
+static uint32_t page_seq[256];
+static void page_touched(uintptr_t address, uint64_t size) {
+    const uint64_t pages=(size+4095)>>12;
+    for (uint64_t i=0;i<pages && i<256;++i) __atomic_add_fetch(&page_seq[((address>>12)+i)&255],1,__ATOMIC_SEQ_CST);
+}
+uint32_t runtime_memory_page_seq(uintptr_t address) { return __atomic_load_n(&page_seq[(address>>12)&255],__ATOMIC_SEQ_CST); }
+#else
 void runtime_memory_reserve(void) {}
+#define page_touched(address, size) ((void)0)
+#endif
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+    page_touched(address,size);
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
     return mapped==MAP_FAILED ? -1 : 0;
 }
+#ifdef __APPLE__
+/* macos: back to a PROT_NONE reservation; a hole would let host mappings land in the guest range. */
+static int host_unmap(uintptr_t address, uint64_t size) { return host_map(address,size,PROT_NONE,1,0); }
+#else
 static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
-static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
+#endif
+static int host_protect(uintptr_t address, uint64_t size, int prot) {
+    page_touched(address,size);
+    return mprotect((void *)address,size,prot);
+}
+#ifdef __APPLE__
+/* macos: released pages read as zero when reused, as on Windows (no hole punching). */
+static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
+#else
 static void host_discard(uint64_t phys, uint64_t size) {
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
 }
+#endif
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
     GpuRange hook = kind==HOOK_MAP ? hook_map : kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
@@ -1079,13 +1159,22 @@ void *runtime_low_map(size_t size, int prot) {
     write_unlock();
     return p;
 #else
+#ifdef __APPLE__
+#define LOW_MAX COMPAT_MAC_LOW_END /* macos: Rosetta's commpage follows */
+#define LOW_FLAGS (MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED) /* the GUEST_LOW reservation is ours */
+#else
+#define LOW_MAX USER_MIN
+#define LOW_FLAGS (MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE)
+#endif
     void *p=MAP_FAILED;
-    while (low_next+size<=USER_MIN) {
-        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+    while (low_next+size<=LOW_MAX) {
+        p=mmap((void *)low_next,size,prot,LOW_FLAGS,-1,0);
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
     }
     write_unlock();
+#undef LOW_MAX
+#undef LOW_FLAGS
     return p==MAP_FAILED ? NULL : p;
 #endif
 }
@@ -1496,6 +1585,15 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
     read_unlock();
     return result;
 }
+#ifdef __APPLE__
+/* macos: whether address is a mapped guest page the guest itself may read, so a read fault there
+ * comes from GPU page tracking (probe.c helper_read_fault). Lock-free: called from the fault
+ * handler; 0 when the table kept changing. */
+int runtime_memory_guest_readable(uintptr_t address) {
+    Vma v;
+    return vma_lookup_fast(address,&v) && v.kind!=KIND_RESERVED && (host_prot(v.prot) & PROT_READ);
+}
+#endif
 void runtime_memory_report(void) {
     printf("Runtime: direct memory allocations=%zu, maps=%zu, live=%" PRIu64 ", budget=%" PRIu64 "\n",
            allocations, maps, live_bytes, POOL_SIZE);

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <boost/asio/io_context.hpp>
 #include "common/polyfill_thread.h"
 #include "video_core/renderdoc.h"
@@ -275,7 +276,24 @@ std::thread g_window_thread;
 std::mutex g_window_mutex;
 std::condition_variable g_window_cv;
 bool g_window_ready;
+#ifdef __APPLE__
+// macos: Cocoa windows and their events belong to the process main thread. The loader keeps it
+// free (bbgpu_main_thread_loop) and the window thread's body runs there instead.
+std::function<void()> g_main_thread_job;
+#endif
 } // namespace
+
+#ifdef __APPLE__
+extern "C" void bbgpu_main_thread_loop(void) {
+    std::function<void()> job;
+    {
+        std::unique_lock lock{g_window_mutex};
+        g_window_cv.wait(lock, [] { return bool(g_main_thread_job); });
+        job = std::move(g_main_thread_job);
+    }
+    job();
+}
+#endif
 
 u32 BbDisplayRefreshHz() {
     static const u32 hz = [] {
@@ -329,7 +347,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "Shadow of the Colossus";
     const s32 width = config->width, height = config->height;
-    g_window_thread = std::thread([title, width, height] {
+    auto window_body = [title, width, height] {
         Common::SetCurrentThreadName("sotc:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
         {
@@ -354,8 +372,17 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         Storage::DataBase::Instance().Close();
         std::fflush(stdout);
         std::_Exit(0);
-    });
+    };
+#ifdef __APPLE__
+    {
+        std::scoped_lock lock{g_window_mutex};
+        g_main_thread_job = window_body;
+    }
+    g_window_cv.notify_all();
+#else
+    g_window_thread = std::thread(window_body);
     g_window_thread.detach();
+#endif
     {
         std::unique_lock lock{g_window_mutex};
         g_window_cv.wait(lock, [] { return g_window_ready; });

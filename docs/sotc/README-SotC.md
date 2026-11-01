@@ -72,6 +72,10 @@ trocar de janela solta o mouse. Botão esquerdo = R1 (agarrar), direito = □ (a
 meio = L1. Sensibilidade e inversão ficam em **Controles** no lançador. Para remapear os botões
 do mouse, use `mouse.<entrada>=left,right,middle,x1,x2`.
 
+No macOS o mouse não é capturado: o cursor fica livre e a câmera gira enquanto o botão esquerdo
+está pressionado (arrastar). `SOTC_MOUSE_LOOK_BUTTON=right` (ou `middle`, `x1`, `x2`) troca o
+botão; `SOTC_MOUSE_CAPTURE=1` volta à captura do Windows (e `=0` no Windows usa o arrastar).
+
 Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
 escolha um em **Controles** no lançador (ou `BB_GAMEPAD=` no `sotc.ini`). O teclado funciona
 junto com o controle:

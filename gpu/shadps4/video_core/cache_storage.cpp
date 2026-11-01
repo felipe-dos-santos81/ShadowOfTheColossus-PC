@@ -152,11 +152,20 @@ static bool CachePackEnabled() {
     return enabled;
 }
 
+// macos: _wfopen is Windows-only; native paths are narrow elsewhere.
+static std::FILE* OpenPack(const std::filesystem::path& path, bool write) {
+#ifdef _WIN32
+    return _wfopen(path.c_str(), write ? L"wb" : L"rb");
+#else
+    return std::fopen(path.c_str(), write ? "wb" : "rb");
+#endif
+}
+
 static constexpr char PackMagic[8] = {'S', 'O', 'T', 'C', 'P', 'K', '1', '\0'};
 
 static void ReadCachePack(const std::filesystem::path& path,
                           std::map<std::string, std::vector<u8>>& out) {
-    std::FILE* f = _wfopen(path.c_str(), L"rb");
+    std::FILE* f = OpenPack(path, false);
     if (!f) {
         return;
     }
@@ -207,7 +216,7 @@ static void WriteCachePack(std::filesystem::path path,
                            std::vector<std::pair<std::string, std::vector<u8>>> files) {
     auto tmp = path;
     tmp += L".tmp";
-    std::FILE* f = _wfopen(tmp.c_str(), L"wb");
+    std::FILE* f = OpenPack(tmp, true);
     if (!f) {
         return;
     }

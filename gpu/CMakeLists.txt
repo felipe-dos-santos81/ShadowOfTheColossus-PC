@@ -54,7 +54,15 @@ endif()
 
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
-find_package(Boost REQUIRED)
+if (APPLE)
+    # macos: Boost headers only, linked into the x86_64 deps prefix (tools/macos_deps.sh) so the
+    # arm64 Homebrew include dir (other libraries' headers) stays out of the include path.
+    find_path(BB_BOOST_INCLUDE_DIR boost/version.hpp REQUIRED)
+    add_library(Boost::headers INTERFACE IMPORTED)
+    set_target_properties(Boost::headers PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${BB_BOOST_INCLUDE_DIR})
+else()
+    find_package(Boost REQUIRED)
+endif()
 # bbport (Windows): MSYS2 has no magic_enum/miniz packages; the submodules are used instead.
 find_package(magic_enum QUIET)
 if (NOT magic_enum_FOUND)
@@ -75,7 +83,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-if (NOT WIN32)
+if (NOT WIN32 AND NOT APPLE)
     pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
 find_package(miniz QUIET)
@@ -155,8 +163,8 @@ file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp sotc/*.cpp)
 # Windows: a DLL cannot leave the runtime_* symbols for bb-probe.exe to resolve, so the
-# library is static there and linked into the executable.
-if (WIN32)
+# library is static there and linked into the executable (macos: same, static into bb-probe).
+if (WIN32 OR APPLE)
     set(BBGPU_KIND STATIC)
 else()
     set(BBGPU_KIND SHARED)
@@ -262,7 +270,7 @@ target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_pa
 target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
 # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe.
-if (NOT WIN32)
+if (NOT WIN32 AND NOT APPLE)
     target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
@@ -274,6 +282,16 @@ if (WIN32)
     target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_win_compat.h)
     target_include_directories(bbgpu PRIVATE third_party/xbyak)
     target_link_libraries(bbgpu PUBLIC Vulkan::Vulkan ws2_32 bcrypt ntdll synchronization winmm)
+elseif (APPLE)
+    # macos: x86_64 under Rosetta 2. SDL3 and FFmpeg are static (their frameworks come from the
+    # pkg-config private libs); the Vulkan loader is opened at run time next to the executable.
+    target_include_directories(bbgpu PRIVATE third_party/xbyak)
+    # pkg-config's "-framework X" pairs come out of FindPkgConfig as "-framework;-lX": link the
+    # static FFmpeg archives by path and name the frameworks here (SDL3's .pc uses -Wl, forms).
+    set_property(TARGET PkgConfig::FFMPEG PROPERTY INTERFACE_LINK_LIBRARIES "${FFMPEG_LINK_LIBRARIES}")
+    set_property(TARGET PkgConfig::FFMPEG PROPERTY INTERFACE_LINK_OPTIONS "")
+    target_link_libraries(bbgpu PUBLIC "-framework CoreFoundation" "-framework CoreVideo"
+        "-framework CoreMedia" "-framework Metal" "-framework QuartzCore")
 else()
     target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
 endif()
@@ -298,6 +316,35 @@ if (WIN32)
     target_link_options(bb-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
     add_executable(bb-gpu-capabilities ../tools/gpu_capabilities.c ../packaging/windows/bb-gpu-capabilities.rc)
     target_link_libraries(bb-gpu-capabilities PRIVATE Vulkan::Vulkan)
+elseif (APPLE)
+    # macos: the loader for Rosetta 2. Guest ranges are reserved at exec time by zerofill
+    # segments (src/compat_mac.c) placed here: the eboot window below 2 GiB, the system/low area
+    # up to Rosetta's commpage (0xFC0000000) and the user range above the GPU-reserved
+    # 0x1000000000-0x6FFFFFFFFF. The executable itself sits far above (image base), not PIE.
+    file(GLOB BB_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
+    file(GLOB BB_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
+    add_library(atrac9 STATIC ${BB_ATRAC9})
+    target_compile_options(atrac9 PRIVATE -w)
+    set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
+    add_executable(bb-probe ../src/probe.c ${BB_RUNTIME} ../src/compat_mac.c ../src/vulkan_smoke.c)
+    set_target_properties(bb-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF POSITION_INDEPENDENT_CODE OFF
+        BUILD_RPATH "@executable_path")
+    target_compile_definitions(bb-probe PRIVATE _DARWIN_C_SOURCE)
+    target_compile_options(bb-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
+    target_include_directories(bb-probe PRIVATE .. ../src)
+    target_link_libraries(bb-probe PRIVATE bbgpu atrac9 -pthread)
+    target_link_options(bb-probe PRIVATE "LINKER:-no_pie,-pagezero_size,0x4000,-image_base,0x700000000000"
+        "LINKER:-segaddr,GUEST_EBOOT,0x400000,-segaddr,GUEST_LOW,0x700000000,-segaddr,GUEST_USER,0x7000000000"
+        "LINKER:-stack_size,0x1000000")
+    # Run-time Vulkan: the SDK's universal loader and the x86_64 KosmicKrisp driver + ICD next to
+    # the executable (vk_platform.cpp points VK_DRIVER_FILES at the executable's folder).
+    find_file(BB_VULKAN_LOADER libvulkan.1.dylib PATHS $ENV{VULKAN_SDK}/lib NO_DEFAULT_PATH REQUIRED)
+    find_path(BB_KOSMICKRISP_DIR libvulkan_kosmickrisp.dylib PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES vulkan
+        NO_DEFAULT_PATH REQUIRED)
+    add_custom_command(TARGET bb-probe POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BB_VULKAN_LOADER} $<TARGET_FILE_DIR:bb-probe>/libvulkan.dylib
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BB_KOSMICKRISP_DIR}/libvulkan_kosmickrisp.dylib
+            ${BB_KOSMICKRISP_DIR}/kosmickrisp_mesa_icd.json $<TARGET_FILE_DIR:bb-probe>)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.

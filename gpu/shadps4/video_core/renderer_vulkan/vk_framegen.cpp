@@ -4,8 +4,14 @@
 #include "video_core/renderer_vulkan/vk_framegen.h"
 #include "video_core/sotc_ui_lang.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <dxgi.h>
+#else
+// macos: no DXGI/Streamline off Windows; DLSS-G is never available there.
+#include <strings.h>
+#define _stricmp strcasecmp
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -44,6 +50,9 @@ Asked AskedMode() {
 
 /// An NVIDIA GPU in the system (DXGI, before Vulkan): Streamline is for those only.
 bool HasNvidiaGpu() {
+#ifndef _WIN32
+    return false; // macos
+#else
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
     if (!dxgi) {
         return false;
@@ -64,6 +73,7 @@ bool HasNvidiaGpu() {
         factory->Release();
     }
     return found;
+#endif
 }
 
 std::atomic<int> current{static_cast<int>(Mode::Off)};

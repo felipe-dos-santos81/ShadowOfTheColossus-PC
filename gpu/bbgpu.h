@@ -14,6 +14,11 @@ typedef struct {
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */
 } BbGpuConfig;
+/* macos: runs on the process main thread and serves the game window there once bbgpu_init
+ * asks for it (Cocoa needs it); does not return while the window is open. */
+#ifdef __APPLE__
+void bbgpu_main_thread_loop(void);
+#endif
 /* Registers kernel event queues (needed with or without graphics). */
 void bbgpu_register_kernel(void);
 /* Creates window, Vulkan device, presenter and GPU command processor. */
