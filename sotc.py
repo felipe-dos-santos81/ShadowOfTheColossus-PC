@@ -135,6 +135,12 @@ def main():
         # macos (Rosetta 2): windowed with a free cursor is bb-probe's default there; the output is
         # sized for a laptop screen. An in-game restart (new render resolution) runs this again.
         env.setdefault('SOTC_OUTPUT_RES', '1280x720')
+        # The game renders at the output size when that is below 1080p instead of rendering
+        # 1080p and scaling it down: the GPU limits the frame rate there (opening cutscene,
+        # 60 FPS mode, M3 Max: 49 FPS at 1280x720 against 39-41 at 1920x1080).
+        output = env['SOTC_OUTPUT_RES'].strip().split('x')
+        if len(output) == 2 and all(n.isdigit() for n in output) and int(output[1]) < 1080:
+            env.setdefault('SOTC_RENDER_RES', env['SOTC_OUTPUT_RES'].strip())
         env.setdefault('BB_RESTART_COMMAND', shlex.join([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]))
     os.chdir(PORT)
     out = PORT / 'out'

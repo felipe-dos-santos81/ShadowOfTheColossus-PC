@@ -16,6 +16,8 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include <pthread/qos.h>
+#include <cstdlib>
 #elif defined(_WIN32)
 #include <windows.h>
 #include "common/string_util.h"
@@ -189,6 +191,15 @@ void SetCurrentThreadName(const char* name) {
     // bbport: guest thread names are kept by the C runtime.
 #ifdef __APPLE__
     pthread_setname_np(name);
+    // macos: the GPU threads run on the performance cores (USER_INTERACTIVE QoS); at the default
+    // class the scheduler may move them to the efficiency cores. SOTC_QOS=0 leaves them there.
+    static const bool qos = [] {
+        const char* v = std::getenv("SOTC_QOS");
+        return !v || v[0] != '0';
+    }();
+    if (qos) {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
 #elif defined(__Bitrig__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
     pthread_set_name_np(pthread_self(), name);
 #elif defined(__NetBSD__)

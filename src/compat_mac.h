@@ -27,6 +27,7 @@ void compat_mac_reserve_guest(void);
 /* A 512 KiB signal stack for the calling thread: SotC fibers run on 16-64 KiB stacks without
  * guard pages, too small for the fault handler (probe.c). */
 void compat_mac_altstack(void);
+void compat_mac_game_qos(void);
 
 #define CLOCK_REALTIME_COARSE CLOCK_REALTIME
 #define PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP PTHREAD_RECURSIVE_MUTEX_INITIALIZER

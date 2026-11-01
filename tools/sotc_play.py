@@ -65,7 +65,7 @@ def main():
     for item in args.env:
         name, value = item.split('=', 1)
         env[name] = value
-    command = [str(out / 'bb-probe.exe'), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
+    command = [str(out / ('bb-probe.exe' if os.name == 'nt' else 'bb-probe')), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--app0', GAME, '--user', str(out / 'user')]
     if args.patches:
         command += ['--patches', args.patches]

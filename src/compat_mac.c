@@ -1,6 +1,9 @@
 /* macos: implementations of compat_mac.h. */
 #ifdef __APPLE__
+#include <pthread.h>
+#include <pthread/qos.h>
 #include <sched.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <stdio.h>
 #include <sys/mman.h>
@@ -44,6 +47,13 @@ void compat_mac_reserve_guest(void) {
 }
 
 #define ALT_STACK_SIZE (512u*1024u)
+/* macos: SOTC_QOS=0 leaves the game's threads at the default QoS class, where the scheduler
+ * may move them to the efficiency cores. */
+void compat_mac_game_qos(void) {
+    static int qos=-1;
+    if (qos<0) { const char *v=getenv("SOTC_QOS"); qos=!v || v[0]!='0'; }
+    if (qos) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+}
 void compat_mac_altstack(void) {
     unsigned char *p=mmap(NULL,ALT_STACK_SIZE+4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
     if (p==MAP_FAILED) return;

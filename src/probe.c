@@ -29,6 +29,9 @@
 #include <pthread.h>
 #include <dlfcn.h>
 #include <execinfo.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#undef round_page /* macos: <mach/vm_param.h>'s macro; probe.c has its own */
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -936,6 +939,109 @@ static int helper_single_step(ucontext_t *uc) {
     return 1;
 }
 typedef long LONG; /* macos: the heap hook's counters below (__atomic builtins instead of Interlocked*) */
+/* macos: SOTC_PROFILE=* as on Windows: from SOTC_PROFILE_DELAY (default 20) s for
+ * SOTC_PROFILE_SECONDS (default 10) s, every ~2 ms each running thread is suspended and its x86
+ * registers read (Rosetta translates thread_get_state), the leaf and the frame-pointer chain
+ * counted; waiting threads every tenth round, apart. The busiest threads go to stderr;
+ * SOTC_PROFILE_OUT gets "thread <index> <samples> <system ms> <user ms> <name>"
+ * and "<index> 0x<address> <leaf> <inclusive>" lines (tools/profile_mac.py symbolizes them). */
+#define MAC_PROFILE_SLOTS (1u<<18)
+#define MAC_PROFILE_WAIT 4096u
+typedef struct { uint32_t thread; uintptr_t address; unsigned leaf, inclusive; } MacProfileSlot;
+static MacProfileSlot *mac_profile_slots;
+static void mac_profile_add(uint32_t thread, uintptr_t address, int leaf) {
+    size_t i=((address*0x9E3779B97F4A7C15ull)^((uint64_t)(thread+1)*0xC2B2AE3D27D4EB4Full))>>46;
+    for (size_t n=0;n<MAC_PROFILE_SLOTS;++n,i=(i+1)&(MAC_PROFILE_SLOTS-1)) {
+        MacProfileSlot *s=&mac_profile_slots[i];
+        if (!s->address) { s->address=address; s->thread=thread; }
+        if (s->address==address && s->thread==thread) { if (leaf) ++s->leaf; ++s->inclusive; return; }
+    }
+}
+static int mac_read_word(uintptr_t address, uintptr_t *value) {
+    mach_vm_size_t got=0;
+    return !(address&7) && mach_vm_read_overwrite(mach_task_self(),address,8,(mach_vm_address_t)value,&got)==KERN_SUCCESS && got==8;
+}
+static void *mac_profiler(void *unused) {
+    (void)unused;
+    const char *delay=getenv("SOTC_PROFILE_DELAY"), *seconds=getenv("SOTC_PROFILE_SECONDS");
+    sleep(delay ? (unsigned)atoi(delay) : 20);
+    mac_profile_slots=calloc(MAC_PROFILE_SLOTS,sizeof(*mac_profile_slots));
+    thread_act_array_t threads; mach_msg_type_number_t count=0;
+    if (!mac_profile_slots || task_threads(mach_task_self(),&threads,&count)) return NULL;
+    unsigned *busy=calloc(count,sizeof(*busy)), *waits=calloc(count,sizeof(*waits));
+    double *user0=calloc(count,sizeof(*user0)), *system0=calloc(count,sizeof(*system0));
+    const thread_t self=mach_thread_self();
+    for (uint32_t i=0;i<count;++i) {
+        thread_basic_info_data_t info; mach_msg_type_number_t n=THREAD_BASIC_INFO_COUNT;
+        if (thread_info(threads[i],THREAD_BASIC_INFO,(thread_info_t)&info,&n)) continue;
+        user0[i]=info.user_time.seconds+info.user_time.microseconds*1e-6;
+        system0[i]=info.system_time.seconds+info.system_time.microseconds*1e-6;
+    }
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
+    const double end=now.tv_sec+now.tv_nsec*1e-9+(seconds ? atoi(seconds) : 10);
+    unsigned rounds=0;
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC,&now);
+        if (now.tv_sec+now.tv_nsec*1e-9>=end) break;
+        ++rounds;
+        for (uint32_t i=0;i<count;++i) {
+            thread_basic_info_data_t info; mach_msg_type_number_t n=THREAD_BASIC_INFO_COUNT;
+            if (threads[i]==self || thread_info(threads[i],THREAD_BASIC_INFO,(thread_info_t)&info,&n)) continue;
+            /* Waiting threads every tenth round, counted apart (thread index + MAC_PROFILE_WAIT):
+             * where they wait. */
+            const int running=info.run_state==TH_STATE_RUNNING;
+            if ((!running && rounds%10) || thread_suspend(threads[i])) continue;
+            const uint32_t slot=running ? i : i+MAC_PROFILE_WAIT;
+            x86_thread_state64_t s; mach_msg_type_number_t sn=x86_THREAD_STATE64_COUNT;
+            if (!thread_get_state(threads[i],x86_THREAD_STATE64,(thread_state_t)&s,&sn)) {
+                if (running) ++busy[i]; else ++waits[i];
+                mac_profile_add(slot,(uintptr_t)s.__rip,1);
+                uintptr_t frame=(uintptr_t)s.__rbp, ret;
+                for (int depth=0; depth<32 && frame && mac_read_word(frame+8,&ret) && ret; ++depth) {
+                    mac_profile_add(slot,ret,0);
+                    uintptr_t next;
+                    if (!mac_read_word(frame,&next) || next<=frame) break;
+                    frame=next;
+                }
+            }
+            thread_resume(threads[i]);
+        }
+        usleep(2000);
+    }
+    fprintf(stderr,"SOTC profile of all %u threads: %u rounds\n",count,rounds);
+    FILE *out=getenv("SOTC_PROFILE_OUT") ? fopen(getenv("SOTC_PROFILE_OUT"),"w") : NULL;
+    for (uint32_t i=0;i<count;++i) {
+        char name[64]="";
+        pthread_t p=pthread_from_mach_thread_np(threads[i]);
+        if (p) pthread_getname_np(p,name,sizeof(name));
+        thread_basic_info_data_t info; mach_msg_type_number_t n=THREAD_BASIC_INFO_COUNT;
+        double user=0, system=0;
+        if (!thread_info(threads[i],THREAD_BASIC_INFO,(thread_info_t)&info,&n)) {
+            user=info.user_time.seconds+info.user_time.microseconds*1e-6-user0[i];
+            system=info.system_time.seconds+info.system_time.microseconds*1e-6-system0[i];
+        }
+        if (busy[i]>rounds/50)
+            fprintf(stderr,"  %6u busy  system %6.0f ms  user %6.0f ms  '%s'\n",busy[i],system*1000,user*1000,name);
+        if (out) fprintf(out,"thread %u %u %.0f %.0f %s\n",i,busy[i],system*1000,user*1000,name);
+        if (out) fprintf(out,"thread %u %u 0 0 %s (waiting)\n",i+MAC_PROFILE_WAIT,waits[i],name);
+    }
+    for (size_t s=0;out && s<MAC_PROFILE_SLOTS;++s) {
+        const uintptr_t address=mac_profile_slots[s].address;
+        Dl_info where;
+        if (address>=UINT64_C(0x710000000000) && dladdr((void *)address,&where) && where.dli_fname) {
+            const char *library=strrchr(where.dli_fname,'/');
+            fprintf(out,"lib 0x%lx %s!%s\n",(unsigned long)address,library ? library+1 : where.dli_fname,
+                    where.dli_sname ? where.dli_sname : "?");
+        }
+    }
+    for (size_t s=0;out && s<MAC_PROFILE_SLOTS;++s)
+        if (mac_profile_slots[s].address)
+            fprintf(out,"%u 0x%lx %u %u\n",mac_profile_slots[s].thread,(unsigned long)mac_profile_slots[s].address,
+                    mac_profile_slots[s].leaf,mac_profile_slots[s].inclusive);
+    if (out) fclose(out);
+    fflush(stderr);
+    return NULL;
+}
 #endif
 #if defined(_WIN32) || defined(__APPLE__)
 /* sotc: the BPE heap of Shadow of the Colossus (EU 1.01 / US 1.00, the same eboot). GPU writes
@@ -943,13 +1049,16 @@ typedef long LONG; /* macos: the heap hook's counters below (__atomic builtins i
  * allocator's metadata (access violations in eboot+0x48xxx/0x49xxx). The GPU side keeps that
  * metadata (video_core/buffer_cache/bpe_heap_guard.cpp, from Pink-shadPS4) but needs the heap
  * object: a breakpoint on the heap's free function (eboot+0x495e0) records its first argument for
- * the first calls, then is removed. SOTC_HEAP_GUARD=0 leaves it off. */
+ * the first calls, then is removed (macOS: a jump to a stub instead, see below). SOTC_HEAP_GUARD=0
+ * leaves it off. */
 #define HEAP_FREE_OFFSET 0x495e0
 const unsigned char *runtime_memory_backing_pointer(uintptr_t address);
 #define HEAP_HOOK_CALLS 2000
-static unsigned char heap_hook_original;
 static volatile LONG heap_hook_calls, heap_hook_done;
+#ifdef _WIN32
+static unsigned char heap_hook_original;
 static _Thread_local int heap_hook_rearm;
+#endif
 static struct { uintptr_t heap; LONG count; } heap_seen[8];
 static volatile uintptr_t heap_chosen;
 #ifdef _WIN32
@@ -958,18 +1067,6 @@ static void heap_hook_write(unsigned char value) {
     unsigned char *at=image+HEAP_FREE_OFFSET;
     if (VirtualProtect(at,1,PAGE_EXECUTE_READWRITE,&old)) { *at=value; VirtualProtect(at,1,old,&old); FlushInstructionCache(GetCurrentProcess(),at,1); }
 }
-#else
-/* macos: the code page is opened around the byte (one writer at a time: two threads would
- * otherwise race their protection changes); no instruction cache flush on x86. */
-static void heap_hook_write(unsigned char value) {
-    static int busy;
-    unsigned char *at=image+HEAP_FREE_OFFSET;
-    void *page=(void *)((uintptr_t)at & ~(uintptr_t)(page_size-1));
-    while (__atomic_exchange_n(&busy,1,__ATOMIC_ACQUIRE)) __builtin_ia32_pause();
-    if (!mprotect(page,page_size,PROT_READ|PROT_WRITE|PROT_EXEC)) { *at=value; mprotect(page,page_size,PROT_READ|PROT_EXEC); }
-    __atomic_store_n(&busy,0,__ATOMIC_RELEASE);
-}
-#endif
 static void install_heap_hook(void) {
     static const unsigned char expected[8]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
     const char *v=getenv("SOTC_HEAP_GUARD");
@@ -977,6 +1074,7 @@ static void install_heap_hook(void) {
     heap_hook_original=image[HEAP_FREE_OFFSET];
     image[HEAP_FREE_OFFSET]=0xCC; /* the image is still writable here */
 }
+#endif
 static void choose_heap(void) {
     uintptr_t best=0; LONG best_count=0;
     for (int i=0;i<8;++i) {
@@ -1035,21 +1133,15 @@ static int heap_hook_trap(EXCEPTION_POINTERS *info) {
     return 1;
 }
 #else
-/* macos: SIGTRAP for both the breakpoint and the single step. The step is told apart first by
- * the thread's own rearm flag (after it, rip-1 is the hook address again and the byte may already
- * be 0xCC). An int3 leaves rip after itself; Windows reports the breakpoint's address. */
-static int heap_hook_trap(ucontext_t *uc) {
-    _STRUCT_X86_THREAD_STATE64 *c=&uc->uc_mcontext->__ss;
-    if (heap_hook_rearm) {
-        heap_hook_rearm=0;
-        if (!__atomic_load_n(&heap_hook_done,__ATOMIC_ACQUIRE)) heap_hook_write(0xCC);
-        c->__rflags&=~(uint64_t)0x100;
-        return 1;
-    }
-    if (!image || c->__rip!=(uint64_t)(uintptr_t)(image+HEAP_FREE_OFFSET+1)) return 0;
-    c->__rip=(uint64_t)(uintptr_t)(image+HEAP_FREE_OFFSET);
-    if (image[HEAP_FREE_OFFSET]!=0xCC) return 1; /* another thread restored it: just run it */
-    const uintptr_t heap=(uintptr_t)c->__rdi;
+static void choose_heap(void);
+/* macos: no breakpoint. Under Rosetta, rewriting the live code page 4000 times (int3 back and
+ * forth around a single step) once faulted inside the handler and ended the game at start-up
+ * (Rosetta watches translated pages for self-modifying code). The function's first 6 bytes
+ * (push rbp; mov rbp,rsp; push r15) jump to a stub instead, patched before the game runs: it
+ * passes the heap (rdi) to heap_free_seen, replays them and jumps back. After the first calls
+ * heap_free_seen returns at once. */
+static void heap_free_seen(uintptr_t heap) {
+    if (__atomic_load_n(&heap_hook_done,__ATOMIC_ACQUIRE)) return;
     for (int i=0;i<8;++i) {
         uintptr_t expected=0;
         if (heap_seen[i].heap==heap) { __atomic_add_fetch(&heap_seen[i].count,1,__ATOMIC_SEQ_CST); break; }
@@ -1057,14 +1149,30 @@ static int heap_hook_trap(ucontext_t *uc) {
             __atomic_add_fetch(&heap_seen[i].count,1,__ATOMIC_SEQ_CST); break;
         }
     }
-    heap_hook_write(heap_hook_original);
-    if (__atomic_add_fetch(&heap_hook_calls,1,__ATOMIC_SEQ_CST)>=HEAP_HOOK_CALLS) {
-        if (!__atomic_exchange_n(&heap_hook_done,1,__ATOMIC_SEQ_CST)) choose_heap();
-    } else {
-        heap_hook_rearm=1;
-        c->__rflags|=0x100; /* put the breakpoint back after this instruction */
-    }
-    return 1;
+    if (__atomic_add_fetch(&heap_hook_calls,1,__ATOMIC_SEQ_CST)>=HEAP_HOOK_CALLS &&
+        !__atomic_exchange_n(&heap_hook_done,1,__ATOMIC_SEQ_CST)) choose_heap();
+}
+/* stub: the free function's argument registers saved, the stack aligned for the call. */
+static void install_heap_hook(unsigned char *stub) {
+    static const unsigned char expected[8]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
+    static const unsigned char code[]={
+        0x57,0x56,0x52,0x51,0x41,0x50,0x41,0x51, /* push rdi, rsi, rdx, rcx, r8, r9 */
+        0x48,0x83,0xec,0x08,                     /* sub rsp,8 */
+        0xff,0x15,0x1a,0x00,0x00,0x00,           /* call [rip+0x1a]: the pointer below */
+        0x48,0x83,0xc4,0x08,                     /* add rsp,8 */
+        0x41,0x59,0x41,0x58,0x59,0x5a,0x5e,0x5f, /* pop r9, r8, rcx, rdx, rsi, rdi */
+        0x55,0x48,0x89,0xe5,0x41,0x57,           /* the replaced push rbp; mov rbp,rsp; push r15 */
+        0xe9};                                   /* jmp rel32 back (filled in) */
+    const char *v=getenv("SOTC_HEAP_GUARD");
+    unsigned char *at=image+HEAP_FREE_OFFSET;
+    if ((v && v[0]=='0') || memcmp(at,expected,sizeof(expected))) return;
+    memcpy(stub,code,sizeof(code));
+    const int32_t back=(int32_t)((at+6)-(stub+sizeof(code)+4));
+    memcpy(stub+sizeof(code),&back,4);
+    void (*target)(uintptr_t)=heap_free_seen;
+    memcpy(stub+18+0x1a,&target,8); /* rip after the call (stub+18) + 0x1a = stub+44 */
+    const int32_t to=(int32_t)(stub-(at+5));
+    at[0]=0xe9; memcpy(at+1,&to,4); at[5]=0x90; /* the image is still writable here */
 }
 #endif
 #endif
@@ -1281,7 +1389,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
 #ifdef __APPLE__
     /* macos: the order of vectored_fault_impl on Windows. Protection faults on mapped pages
      * arrive as SIGBUS, unmapped ones as SIGSEGV. */
-    if (sig == SIGTRAP && (heap_hook_trap(context) || helper_single_step(context))) return;
+    if (sig == SIGTRAP && helper_single_step(context)) return;
     const int access = sig == SIGSEGV || sig == SIGBUS;
     if (access && gpu_enabled && helper_read_fault(info, context)) return;
     if (access && gpu_enabled && bbgpu_handle_fault(context, info->si_addr)) return;
@@ -1620,6 +1728,10 @@ int main(int argc, char **argv) {
 #ifdef __APPLE__
     sigaction(SIGTRAP, &sa, NULL); /* heap hook and readback helper single steps */
     (void)timeout_seconds; /* no watchdog: it lists threads through /proc */
+    if (getenv("SOTC_PROFILE")) {
+        pthread_t profile_thread;
+        if (!pthread_create(&profile_thread,NULL,mac_profiler,NULL)) pthread_detach(profile_thread);
+    }
 #else
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
@@ -1822,8 +1934,11 @@ int main(int argc, char **argv) {
 #endif
     if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
     if (sotc_cmdline) apply_sotc_cmdline(sotc_cmdline, size);
-#if defined(_WIN32) || defined(__APPLE__)
+#ifdef _WIN32
     if (sotc_cpu) install_heap_hook();
+#elif defined(__APPLE__)
+    /* macos: the stub sits below the --sotc-cmdline text at the end of the trampoline area. */
+    if (sotc_cpu) install_heap_hook(image+round_page(size)+SOTC_TRAMPOLINE_SIZE-16384-64);
 #endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);

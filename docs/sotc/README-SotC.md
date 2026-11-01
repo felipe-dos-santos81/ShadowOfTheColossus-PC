@@ -76,6 +76,10 @@ No macOS o mouse não é capturado: o cursor fica livre e a câmera gira enquant
 está pressionado (arrastar). `SOTC_MOUSE_LOOK_BUTTON=right` (ou `middle`, `x1`, `x2`) troca o
 botão; `SOTC_MOUSE_CAPTURE=1` volta à captura do Windows (e `=0` no Windows usa o arrastar).
 
+No macOS a janela abre em 1280x720 e, com saída abaixo de 1080p, o jogo renderiza no tamanho da
+saída (`SOTC_RENDER_RES`) em vez de 1080p reduzido: ~20% mais FPS onde a GPU limita. As threads
+do jogo usam a QoS interativa (núcleos de desempenho); `SOTC_QOS=0` desliga.
+
 Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
 escolha um em **Controles** no lançador (ou `BB_GAMEPAD=` no `sotc.ini`). O teclado funciona
 junto com o controle:

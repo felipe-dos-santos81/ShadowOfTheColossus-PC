@@ -150,6 +150,7 @@ static void attach(GuestThread *t) {
     memset(block,0,total);
 #ifdef __APPLE__
     compat_mac_altstack(); /* macos: every thread that runs guest code gets the fault handler's stack */
+    compat_mac_game_qos();
 #endif
     if (tls_filesz) memcpy(block,tls_template,tls_filesz);
     uint64_t *tcb=(uint64_t *)(block+offset);
