@@ -73,8 +73,10 @@ meio = L1. Sensibilidade e inversão ficam em **Controles** no lançador. Para r
 do mouse, use `mouse.<entrada>=left,right,middle,x1,x2`.
 
 No macOS o mouse não é capturado: o cursor fica livre e a câmera gira enquanto o botão esquerdo
-está pressionado (arrastar). `SOTC_MOUSE_LOOK_BUTTON=right` (ou `middle`, `x1`, `x2`) troca o
-botão; `SOTC_MOUSE_CAPTURE=1` volta à captura do Windows (e `=0` no Windows usa o arrastar).
+está pressionado (arrastar). Esse botão só gira a câmera; para agarrar (R1), use a tecla 3 ou
+outro botão (`mouse.r1=x1`, por exemplo). `SOTC_MOUSE_LOOK_BUTTON=right` (ou `middle`, `x1`, `x2`)
+troca o botão de olhar; `SOTC_MOUSE_CAPTURE=1` volta à captura do Windows (e `=0` no Windows usa o
+arrastar).
 
 No macOS a janela abre em 1280x720 e, com saída abaixo de 1080p, o jogo renderiza no tamanho da
 saída (`SOTC_RENDER_RES`) em vez de 1080p reduzido: ~20% mais FPS onde a GPU limita. As threads

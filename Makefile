@@ -26,7 +26,13 @@ build: ## Build bb-probe (CMake + Ninja; macOS: x86_64 for Rosetta 2, runs deps 
 	bash build.sh
 
 rebuild: ## Incremental rebuild of bb-probe after the first build
-	ninja -C out/gpu bb-probe && cp out/gpu/bb-probe$(EXE) out/
+ifeq ($(EXE),.exe)
+	ninja -C out/gpu bb-probe bb-gpu-capabilities && cp out/gpu/bb-probe.exe out/gpu/bb-gpu-capabilities.exe out/
+else ifeq ($(shell uname -s),Darwin)
+	ninja -C out/gpu bb-probe && cp out/gpu/bb-probe out/
+else
+	bash build.sh # Linux: build.sh links bb-probe itself (no CMake target)
+endif
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 

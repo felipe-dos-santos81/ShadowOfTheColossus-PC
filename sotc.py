@@ -138,9 +138,13 @@ def main():
         # The game renders at the output size when that is below 1080p instead of rendering
         # 1080p and scaling it down: the GPU limits the frame rate there (opening cutscene,
         # 60 FPS mode, M3 Max: 49 FPS at 1280x720 against 39-41 at 1920x1080).
+        # Only sizes scripts/sotc_modes.py takes (640x360 up, multiples of 8): 1600x900 or
+        # 1366x768 render at 1080p and are scaled down, as before.
         output = env['SOTC_OUTPUT_RES'].strip().split('x')
-        if len(output) == 2 and all(n.isdigit() for n in output) and int(output[1]) < 1080:
-            env.setdefault('SOTC_RENDER_RES', env['SOTC_OUTPUT_RES'].strip())
+        if len(output) == 2 and all(n.isdigit() for n in output):
+            w, h = map(int, output)
+            if 640 <= w and 360 <= h < 1080 and w % 8 == 0 and h % 8 == 0:
+                env.setdefault('SOTC_RENDER_RES', f'{w}x{h}')
         env.setdefault('BB_RESTART_COMMAND', shlex.join([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]))
     os.chdir(PORT)
     out = PORT / 'out'

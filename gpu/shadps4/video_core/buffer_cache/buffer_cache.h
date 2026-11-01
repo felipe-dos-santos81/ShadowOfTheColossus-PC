@@ -262,7 +262,7 @@ private:
     void MarkWrittenByGuest(VAddr addr, u64 size);
     void FinishAsyncReadback(AsyncReadback& readback);
     AsyncReadback* FindInflightReadback(VAddr addr, u64 size);
-    void MarkInflightReadbacksDirty(VAddr addr, u64 size);
+    void MarkInflightReadbacksDirty(VAddr addr, u64 size, bool direct_only = false);
     std::vector<AsyncReadback*> inflight_readbacks;
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
@@ -403,6 +403,8 @@ private:
     int rb_direct{};
     u32 NewestWriteTick(std::span<const ReadbackItem> pending) const;
     void ProbeReadback(u32 newest);
+    /// macos: dates the blocks of an arena write recorded now (SOTC_RB_DIRECT).
+    void NoteWriteTick(VAddr addr, u64 size);
     /// macos: copies arena bytes from the mapped chunk memory; false where a block is not
     /// resident or its memory is not host-visible.
     bool ReadArenaDirect(VAddr addr, u64 size, u8* out);

@@ -27,6 +27,8 @@ void compat_mac_reserve_guest(void);
 /* A 512 KiB signal stack for the calling thread: SotC fibers run on 16-64 KiB stacks without
  * guard pages, too small for the fault handler (probe.c). */
 void compat_mac_altstack(void);
+/* Gives the calling thread's signal stack back (a guest thread that ends). */
+void compat_mac_altstack_free(void);
 void compat_mac_game_qos(void);
 /* Starts the thread that keeps the GPU at its full clock (compat_mac_gpu.m; SOTC_GPU_KEEPALIVE=0: off). */
 void compat_mac_gpu_keepalive(void);

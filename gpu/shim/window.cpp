@@ -376,7 +376,11 @@ bool WindowSDL::PollEvents() {
             const bool active = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) &&
                                 !BbOverlay::CapturesInput();
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && active) {
-                g_mouse_buttons |= 1u << event.button.button;
+                // The look button only turns the camera: its pad binding (left = R1, grip) would
+                // otherwise be held through every camera drag.
+                if (event.button.button != LookButton()) {
+                    g_mouse_buttons |= 1u << event.button.button;
+                }
                 g_mouse_captured = true;
             } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 g_mouse_buttons &= ~(1u << event.button.button);

@@ -54,12 +54,20 @@ void compat_mac_game_qos(void) {
     if (qos<0) { const char *v=getenv("SOTC_QOS"); qos=!v || v[0]!='0'; }
     if (qos) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
 }
+static _Thread_local unsigned char *altstack;
 void compat_mac_altstack(void) {
+    if (altstack) return;
     unsigned char *p=mmap(NULL,ALT_STACK_SIZE+4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
     if (p==MAP_FAILED) return;
     mprotect(p,4096,PROT_NONE); /* guard page below the stack */
     stack_t stack={.ss_sp=p+4096,.ss_size=ALT_STACK_SIZE,.ss_flags=0};
     if (sigaltstack(&stack,NULL)) munmap(p,ALT_STACK_SIZE+4096);
+    else altstack=p;
+}
+void compat_mac_altstack_free(void) {
+    if (!altstack) return;
+    const stack_t off={.ss_flags=SS_DISABLE};
+    if (!sigaltstack(&off,NULL)) { munmap(altstack,ALT_STACK_SIZE+4096); altstack=NULL; }
 }
 
 /* ponytail: timed locks poll trylock (sched_yield, then 50 us naps) until the deadline, so a

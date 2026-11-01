@@ -633,15 +633,19 @@ static int pool(void) {
 }
 #ifdef __APPLE__
 void runtime_memory_reserve(void) { compat_mac_reserve_guest(); }
-/* macos: a change count per page hash bucket, bumped by every host map, unmap and protection
- * change: the loader's precise-readback helper (probe.c) restores a page it opened only if
- * nothing changed it meanwhile (Windows asks VirtualQuery instead). */
-static uint32_t page_seq[256];
+/* macos: a change count per page hash bucket, bumped before and after every host map, unmap and
+ * protection change: the loader's precise-readback helper (probe.c) restores a page it opened
+ * only if nothing changed it meanwhile (Windows asks VirtualQuery instead). Pages 256 MiB apart
+ * share a bucket, and a range of 65536 pages or more bumps them all: such a change, though it was
+ * not this page's, leaves the page readable (256 buckets were 1 MiB apart and far more often). */
+#define PAGE_SEQ_BUCKETS 65536u
+static uint32_t page_seq[PAGE_SEQ_BUCKETS];
 static void page_touched(uintptr_t address, uint64_t size) {
     const uint64_t pages=(size+4095)>>12;
-    for (uint64_t i=0;i<pages && i<256;++i) __atomic_add_fetch(&page_seq[((address>>12)+i)&255],1,__ATOMIC_SEQ_CST);
+    for (uint64_t i=0;i<pages && i<PAGE_SEQ_BUCKETS;++i)
+        __atomic_add_fetch(&page_seq[((address>>12)+i)%PAGE_SEQ_BUCKETS],1,__ATOMIC_SEQ_CST);
 }
-uint32_t runtime_memory_page_seq(uintptr_t address) { return __atomic_load_n(&page_seq[(address>>12)&255],__ATOMIC_SEQ_CST); }
+uint32_t runtime_memory_page_seq(uintptr_t address) { return __atomic_load_n(&page_seq[(address>>12)%PAGE_SEQ_BUCKETS],__ATOMIC_SEQ_CST); }
 #else
 void runtime_memory_reserve(void) {}
 #define page_touched(address, size) ((void)0)
@@ -651,6 +655,7 @@ static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, ui
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
+    page_touched(address,size); /* a helper that read the count between the two sees a change */
     return mapped==MAP_FAILED ? -1 : 0;
 }
 #ifdef __APPLE__
@@ -661,7 +666,9 @@ static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)
 #endif
 static int host_protect(uintptr_t address, uint64_t size, int prot) {
     page_touched(address,size);
-    return mprotect((void *)address,size,prot);
+    const int result=mprotect((void *)address,size,prot);
+    page_touched(address,size);
+    return result;
 }
 #ifdef __APPLE__
 /* macos: released pages read as zero when reused, as on Windows (no hole punching). */

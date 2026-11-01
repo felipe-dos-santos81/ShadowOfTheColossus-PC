@@ -336,6 +336,9 @@ static void *host_start(void *p) {
 #endif
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
+#ifdef __APPLE__
+    compat_mac_altstack_free(); /* macos: 516 KiB per guest thread that ends */
+#endif
     pthread_mutex_lock(&lock);
     t->finished=1; ++exited;
 #ifdef _WIN32

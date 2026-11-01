@@ -470,7 +470,10 @@ bool BufferCache::ReadArenaDirect(VAddr addr, u64 size, u8* out) {
         }
         ArenaChunk& chunk = *found->second;
         if (!chunk.mapped) {
-            if (!(types[chunk.memory_type].propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible)) {
+            // Coherent only: no invalidate before each read (the unified memory of Apple GPUs).
+            constexpr auto needed =
+                vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+            if ((types[chunk.memory_type].propertyFlags & needed) != needed) {
                 return false;
             }
             const auto [result, pointer] = instance.GetDevice().mapMemory(chunk.memory, 0, VK_WHOLE_SIZE);
@@ -577,11 +580,15 @@ void BufferCache::ProbeReadback(u32 newest) {
     }
 }
 
-void BufferCache::MarkInflightReadbacksDirty(VAddr addr, u64 size) {
+void BufferCache::MarkInflightReadbacksDirty(VAddr addr, u64 size, bool direct_only) {
     // sotc: the command processor (a GPU write, its own write or an applied readback after
     // which the guest may write) changed these bytes: asynchronous readbacks of them in flight
     // hold stale data (FinishAsyncReadback reads them back again).
+    // macos: direct_only, an arena write a GPU copy recorded earlier is not affected by.
     for (AsyncReadback* readback : inflight_readbacks) {
+        if (direct_only && !readback->direct) {
+            continue;
+        }
         for (const auto& item : readback->pending) {
             readback->dirty |= addr < item.addr + item.size && item.addr < addr + size;
         }
@@ -1258,12 +1265,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
 
 void BufferCache::AddGpuModified(VAddr addr, u64 size) {
     MarkInflightReadbacksDirty(addr, size);
-    if (block_write_tick && size != 0) {
-        const u32 tick = static_cast<u32>(scheduler.CurrentTick());
-        for (u64 block = addr >> block_shift; block <= (addr + size - 1) >> block_shift; ++block) {
-            block_write_tick[block] = tick;
-        }
-    }
+    NoteWriteTick(addr, size);
     // sotc: SOTC_GPUMOD_WATCH=<address>: who marks it as GPU-written (first 40 times).
     static const VAddr env_watch = [] {
         const char* v = std::getenv("SOTC_GPUMOD_WATCH");
@@ -1392,7 +1394,24 @@ void BufferCache::NoteHotRead(VAddr addr, u64 size) {
     hot_reads_next = (hot_reads_next + 1) % NumHotReads;
 }
 
+void BufferCache::NoteWriteTick(VAddr addr, u64 size) {
+    if (!block_write_tick || size == 0) {
+        return;
+    }
+    const u32 tick = static_cast<u32>(scheduler.CurrentTick());
+    for (u64 block = addr >> block_shift; block <= (addr + size - 1) >> block_shift; ++block) {
+        block_write_tick[block] = tick;
+    }
+}
+
 void BufferCache::RecordCurrentWrite(VAddr addr, u64 size) {
+    // macos: every arena write of the command buffer being recorded (uploads, fills, tiled image
+    // copies, not only the GPU-modified ones) dates its blocks for SOTC_RB_DIRECT, and a direct
+    // readback waiting for an earlier tick must not read bytes this write may be changing.
+    NoteWriteTick(addr, size);
+    if (!inflight_readbacks.empty()) {
+        MarkInflightReadbacksDirty(addr, size, true);
+    }
     if (!hot_write_pending) {
         const VAddr end = addr + size;
         for (const auto& [start, stop] : hot_reads) {

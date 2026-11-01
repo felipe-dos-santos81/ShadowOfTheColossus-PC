@@ -24,7 +24,9 @@ mark() { touch "$P/.stamp-$1"; echo "deps: $1 ok"; }
 fetch() { # url dir
     [ -d "$SRC/$2" ] && return
     local f="$SRC/$(basename "$1")"
-    [ -f "$f" ] || curl -fL --retry 3 -o "$f" "$1"
+    # A download or extraction cut short leaves nothing a later run would trust.
+    [ -f "$f" ] || { curl -fL --retry 3 -o "$f.part" "$1" && mv "$f.part" "$f"; }
+    rm -rf "$SRC/$2.tmp"
     mkdir -p "$SRC/$2.tmp" && tar -xf "$f" -C "$SRC/$2.tmp" --strip-components 1 && mv "$SRC/$2.tmp" "$SRC/$2"
 }
 cmake_dep() { # name srcdir [args...]
@@ -46,6 +48,7 @@ fi
 if ! done_ zydis; then
     [ -d "$SRC/zydis" ] || git clone -q --depth 1 -b v4.1.1 --recurse-submodules --shallow-submodules \
         https://github.com/zyantific/zydis "$SRC/zydis"
+    git -C "$SRC/zydis" submodule update -q --init --depth 1 # a clone cut short leaves zycore empty
     cmake_dep zycore "$SRC/zydis/dependencies/zycore" -DZYCORE_BUILD_SHARED_LIB=OFF
     cmake_dep zydis "$SRC/zydis" -DZYDIS_BUILD_TOOLS=OFF -DZYDIS_BUILD_EXAMPLES=OFF -DZYDIS_BUILD_SHARED_LIB=OFF
 fi
@@ -82,11 +85,11 @@ if ! done_ ffmpeg; then
 fi
 if ! done_ kosmickrisp; then
     KK=$SRC/kosmickrisp
-    if [ ! -d "$KK" ]; then
-        git clone -q --filter=blob:none https://github.com/shadexternals/mesa-kosmickrisp "$KK"
-        git -C "$KK" checkout -q 52d87b35f3a4fc8aff5acb4daaa548c8ff7870f1
-        git -C "$KK" submodule update -q --init --recursive --depth 1
-    fi
+    KK_PIN=52d87b35f3a4fc8aff5acb4daaa548c8ff7870f1
+    [ -d "$KK/.git" ] || git clone -q --filter=blob:none https://github.com/shadexternals/mesa-kosmickrisp "$KK"
+    # Checked on every run: a clone cut short after the clone step must not build another commit.
+    [ "$(git -C "$KK" rev-parse HEAD)" = "$KK_PIN" ] || git -C "$KK" checkout -q "$KK_PIN"
+    git -C "$KK" submodule update -q --init --recursive --depth 1
     cmake -S "$KK" -B "$KK/build-x86_64" -G Ninja -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_BUILD_TYPE=Release >/dev/null
     ninja -C "$KK/build-x86_64" >/dev/null
     mkdir -p "$P/vulkan"

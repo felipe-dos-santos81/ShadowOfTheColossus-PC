@@ -7,6 +7,8 @@
 #include "common/singleton.h"
 #include "common/types.h"
 
+#include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -16,6 +18,9 @@
 #include <vector>
 
 namespace Storage {
+
+/// macos: opens a cache file for binary reading or writing (_wfopen on Windows, fopen elsewhere).
+std::FILE* OpenFile(const std::filesystem::path& path, bool write);
 
 enum class BlobType : u32 {
     ShaderMeta,
