@@ -55,9 +55,11 @@ static void *keepalive(void *arg) {
         }
         fprintf(stderr, "SOTC GPU keep-alive: on%s (SOTC_GPU_KEEPALIVE=0 turns it off)\n",
                 always ? "" : " while on AC power");
-        /* ~15 ms per dispatch at the top clock: the thread wakes ~70 times a second. Two command
-         * buffers in flight, so the next one is queued before the last ends: no idle gap. */
-        const uint32_t iterations = 1000000;
+        /* ~1.5 ms per dispatch at the top clock (the thread wakes ~660 times a second). Longer
+         * ones hold the GPU from the game's work: 15 ms dispatches cost 7-16% FPS in the opening
+         * cutscene at 60 FPS (GPU-bound), 1.5 ms and 0.3 ms ones nothing. Two command buffers in
+         * flight, so the next one is queued before the last ends: no idle gap. */
+        const uint32_t iterations = 100000;
         id<MTLCommandBuffer> previous = nil;
         for (unsigned round = 0;; ++round) {
             if (!always && round % 64 == 0 && !on_ac_power()) { /* checked about once a second */
