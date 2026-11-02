@@ -90,10 +90,20 @@ if ! done_ kosmickrisp; then
     # Checked on every run: a clone cut short after the clone step must not build another commit.
     [ "$(git -C "$KK" rev-parse HEAD)" = "$KK_PIN" ] || git -C "$KK" checkout -q "$KK_PIN"
     git -C "$KK" submodule update -q --init --recursive --depth 1
-    cmake -S "$KK" -B "$KK/build-x86_64" -G Ninja -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_BUILD_TYPE=Release >/dev/null
-    ninja -C "$KK/build-x86_64" >/dev/null
+    # Homebrew's LLVM, not Apple's clang: Apple clang 21 expands fixed-size memcpy into `rep movsb`,
+    # which Rosetta runs at ~3 GB/s (16x slower than memcpy); the driver does two such copies per
+    # draw (kk_upload_descriptor_root, kk_cmd_buffer_flush_push_descriptors). A build directory
+    # configured by another compiler is wiped: meson cannot switch compilers in place.
+    KK_LLVM=/opt/homebrew/opt/llvm/bin
+    [ -x "$KK_LLVM/clang" ] || { echo "deps: Homebrew llvm missing (brew install llvm)"; exit 1; }
+    grep -qs "Apple clang version" "$KK/build-x86_64/externals/mesa/build-target/meson-logs/meson-log.txt" && rm -rf "$KK/build-x86_64"
+    PATH="$KK_LLVM:$PATH" cmake -S "$KK" -B "$KK/build-x86_64" -G Ninja -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_BUILD_TYPE=Release >/dev/null
+    PATH="$KK_LLVM:$PATH" ninja -C "$KK/build-x86_64" >/dev/null
     mkdir -p "$P/vulkan"
     cp "$KK/build-x86_64/outputs/libvulkan_kosmickrisp.dylib" "$KK/build-x86_64/outputs/kosmickrisp_mesa_icd.json" "$P/vulkan/"
+    # meson only trusts the SDK's zlib with Apple's clang; with another compiler it builds its own
+    # shared zlib (@rpath/libz.1.dylib, which nothing ships). The system zlib has the same API.
+    install_name_tool -change @rpath/libz.1.dylib /usr/lib/libz.1.dylib "$P/vulkan/libvulkan_kosmickrisp.dylib"
     mark kosmickrisp
 fi
 echo "deps: all in $P"

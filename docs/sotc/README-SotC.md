@@ -93,6 +93,14 @@ escrever, o port lê direto, sem esperar uma cópia da GPU (30 FPS travados no S
 25–27). Se aparecer algum defeito de imagem, `SOTC_RB_DIRECT=0` volta ao caminho antigo para
 comparar.
 
+No macOS o driver Vulkan (KosmicKrisp, Vulkan sobre Metal) é compilado por `tools/macos_deps.sh`
+com o LLVM do Homebrew (`brew install llvm`), não com o clang da Apple: este transforma cópias de
+tamanho fixo em `rep movsb`, que o Rosetta executa 16 vezes mais devagar que um `memcpy`, e o
+driver faz duas dessas cópias por desenho (~30% da thread que grava os comandos). Com o driver
+refeito, o modo 60 FPS no Santuário passou de ~32 para ~35 FPS; o modo normal segue travado em 30.
+Depois de atualizar o Homebrew LLVM ou o script, `rm out/deps-x86_64/.stamp-kosmickrisp` e
+`bash tools/macos_deps.sh` refazem o driver.
+
 Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
 escolha um em **Controles** no lançador (ou `BB_GAMEPAD=` no `sotc.ini`). O teclado funciona
 junto com o controle:
@@ -167,4 +175,7 @@ Estas variáveis de ambiente ajudam a investigar problemas:
 | `SOTC_WAIT_MARKER=1/2` | esperas pela GPU consultam um marcador escrito por ela (experimental) |
 | `SOTC_CMD_STATS=1/2` | draws e dispatches por quadro (2: shaders de compute mais usados) |
 | `SOTC_TSC=qpc/native` | relógio do jogo: `qpc` sempre usa o QPC do Windows, `native` sempre o TSC do processador (padrão: QPC só quando os núcleos discordam no TSC) |
+| `SOTC_MUTEX_STATS=1` | macOS: por ponto de chamada, quantos locks de mutex do jogo encontraram o mutex ocupado, quantos dormiram no kernel e os tempos de espera e de posse, a cada 5 s |
+| `SOTC_PROFILE_TIMELINE=arquivo` | macOS, com `SOTC_PROFILE=*`: a cada ~2 ms, o estado e a pilha das threads do jogo e da GPU (`tools/profile_timeline.py` resume) |
+| `SOTC_PUSH_DESC=0` | associa os descritores a partir de um heap em vez de empurrá-los a cada desenho (move trabalho da thread de gravação para a de desenho) |
 | `SOTC_UI_HIRES=0` | com DLSS, a interface (textos, logos, HUD) volta a ser desenhada na resolução de renderização e ampliada, em vez de na resolução de saída |

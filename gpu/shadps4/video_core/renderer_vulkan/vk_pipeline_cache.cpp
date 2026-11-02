@@ -489,6 +489,15 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     saved_driver_cache_size = driver_cache_data.size();
     if (!driver_cache_data.empty()) {
         std::fprintf(stderr, "SOTC driver cache: %zu KB loaded\n", driver_cache_data.size() >> 10);
+        // sotc: a copy from another build of the driver is ignored by it (header UUID), and the
+        // same shaders serialize to the same number of bytes, so the size test in SaveDriverCache
+        // would never save the rebuilt copy: every start would compile every pipeline again.
+        const auto& props = instance.GetPhysicalDevice().getProperties();
+        if (driver_cache_data.size() < 32 ||
+            std::memcmp(driver_cache_data.data() + 16, props.pipelineCacheUUID.data(), 16) != 0) {
+            std::fprintf(stderr, "SOTC driver cache: saved copy is from another driver build, rebuilding it\n");
+            saved_driver_cache_size = 0;
+        }
     }
     if (DriverCacheEnabled()) {
         // New pipelines (first visits) are saved every minute while playing: the game is often
