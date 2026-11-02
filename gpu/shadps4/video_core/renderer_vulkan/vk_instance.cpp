@@ -851,7 +851,16 @@ void Instance::CollectPhysicalMemoryInfo() {
         }
         if (supports_memory_budget) {
             device_initial_usage += budget.heapUsage[i];
+#ifdef __APPLE__
+            // macos: KosmicKrisp's budget is Mesa's "free system memory" figure, and macOS keeps
+            // free memory small on purpose (file cache): 2.9 GB of a 30 GB heap here, which the
+            // 8 GB reserve below turned into the 2 GB floor. The texture cache then collected
+            // every frame and dropped 145 images at each area load ("vram 3070/2048 MB"). The
+            // heap size is Metal's recommended working set: the right cap on unified memory.
+            total_memory_budget += memory_props.memoryHeaps[i].size;
+#else
             total_memory_budget += budget.heapBudget[i];
+#endif
             continue;
         }
         // If memory budget is not supported, use the size of the heap as the budget.

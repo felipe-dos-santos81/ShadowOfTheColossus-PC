@@ -102,6 +102,16 @@ refeito, o modo 60 FPS no Santuário passou de ~32 para ~35 FPS; o modo normal s
 Depois de atualizar o Homebrew LLVM ou o script, `rm out/deps-x86_64/.stamp-kosmickrisp` e
 `bash tools/macos_deps.sh` refazem o driver.
 
+No macOS os pipelines novos (uma combinação de shaders vista pela primeira vez, numa área ou
+efeito novo) são compilados em segundo plano pelos trabalhadores de pipeline, como no Windows: o
+objeto que precisa deles aparece alguns quadros depois, uma vez só (o pipeline vai para o cache do
+driver em até um minuto). Antes cada um congelava o jogo por 0,4–0,5 s no processador de comandos,
+porque o driver não tem a extensão `VK_EXT_vertex_input_dynamic_state` que o caminho em segundo
+plano exigia. `SOTC_ASYNC_SHADERS=0` volta a esperar pela compilação (congela em vez de atrasar o
+objeto). A memória de vídeo para texturas segue o tamanho que o Metal recomenda (RAM unificada
+menos 8 GB), não a RAM livre do momento: com 36 GB, 22 GB em vez dos 2 GB de antes, que faziam a
+coleta de texturas rodar a cada quadro e descartar texturas a cada carregamento de área.
+
 Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
 escolha um em **Controles** no lançador (ou `BB_GAMEPAD=` no `sotc.ini`). O teclado funciona
 junto com o controle:
