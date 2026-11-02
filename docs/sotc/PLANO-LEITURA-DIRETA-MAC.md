@@ -156,3 +156,18 @@ finish). Nesse caso a etapa 2 vem antes da 1, e a meta passa a ser ~28 FPS, não
   own tick` por 5 s). Capturas do Santuário iguais às do caminho de hoje.
 - Falta a etapa 3: o usuário joga a rota completa com `SOTC_RB_DIRECT=1` (santuário → cavalo →
   troca de área → colosso) antes de virar padrão no Mac.
+- 01/11, depois da revisão de código (`aa81825`): toda escrita na arena gravada no command buffer
+  aberto (envios, preenchimento de HTile, cópias de imagem) passou a datar seus blocos; antes só as
+  escritas da GPU marcadas como "GPU-modified" datavam, e uma leitura direta podia perder uma
+  escrita mais nova. Conferência de novo: ~110 800 leituras no Santuário, 0 bytes diferentes;
+  Santuário ligado 30,0 FPS; abertura (modo 60) 52,8 FPS.
+- 01/11, sem trava (modo 60, Santuário, 720p): ligado ~31–33 FPS, desligado 26,9. O modo 60 FPS
+  não é realista ali; nenhuma thread sozinha limita (gravador ~85% rodando, desenho ~70%,
+  processador de comandos ~68%, workers do jogo 54–80%).
+- 01/11, abertura + tela de título em loop, 6 min, modo 30 (cenas variadas: penhascos, cavalo,
+  ponte, título): conferência ~114 000 leituras, **0 bytes diferentes**; FPS desligado média
+  29,7 (mínimo 24,8) contra ligado 29,9 (mínimo 26,8). Capturas iguais nos dois modos.
+  Total conferido até aqui: ~310 000 leituras, nenhuma diferença.
+- 01/11: **etapa 3** a pedido do usuário: `SOTC_RB_DIRECT` passa a ser 1 por padrão no Mac
+  (`SOTC_RB_DIRECT=0` desliga), antes da rota completa jogada por ele (cavalo no mundo aberto e
+  colosso continuam sem teste automático).

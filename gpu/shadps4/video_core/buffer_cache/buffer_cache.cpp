@@ -110,6 +110,12 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     rb_probe = std::getenv("SOTC_RB_DIRECT_PROBE") && std::getenv("SOTC_RB_DIRECT_PROBE")[0] == '1';
     if (const char* v = std::getenv("SOTC_RB_DIRECT")) {
         rb_direct = std::atoi(v);
+    } else {
+#ifdef __APPLE__
+        // macos: on by default (unified memory; docs/sotc/PLANO-LEITURA-DIRETA-MAC.md): ~310 000
+        // readbacks compared with the GPU copy, no byte different; Shrine 25-27 -> 30 FPS.
+        rb_direct = 1;
+#endif
     }
     if (rb_probe || rb_direct != 0) {
         block_write_tick =

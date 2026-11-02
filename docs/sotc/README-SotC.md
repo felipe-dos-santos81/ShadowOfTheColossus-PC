@@ -88,6 +88,11 @@ tomada, o port mantém um trabalho mínimo sempre na fila da GPU, que fica no cl
 (26–27 FPS ali), ao custo de ~4–6 W a mais. Na bateria isso não roda; `SOTC_GPU_KEEPALIVE=1`
 liga também na bateria e `=0` desliga sempre.
 
+No macOS a CPU e a GPU usam a mesma memória: quando o jogo lê algo que a GPU já terminou de
+escrever, o port lê direto, sem esperar uma cópia da GPU (30 FPS travados no Santuário, antes
+25–27). Se aparecer algum defeito de imagem, `SOTC_RB_DIRECT=0` volta ao caminho antigo para
+comparar.
+
 Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
 escolha um em **Controles** no lançador (ou `BB_GAMEPAD=` no `sotc.ini`). O teclado funciona
 junto com o controle:
