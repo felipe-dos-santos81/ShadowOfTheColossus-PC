@@ -66,7 +66,10 @@ GraphicsPipeline::GraphicsPipeline(
     pipeline_layout = std::move(layout);
     SetObjectName(device, *pipeline_layout, "Graphics PipelineLayout {}", debug_str);
 
-    if (!preloading) {
+    // sotc: a layout already in sdata came from the command processor (a pipeline worker's job
+    // when vertex input is not dynamic state) or from the cache (preloading): the sharps are not
+    // read here, where they may belong to later draws.
+    if (!preloading && sdata.vertex_attributes.empty()) {
         VertexInputs<AmdGpu::Buffer> guest_buffers;
         if (!instance.IsVertexInputDynamicState()) {
             const auto& vs_info = runtime_infos[u32(Shader::SwStage::Vertex)].sw.vs;
@@ -476,11 +479,20 @@ void GraphicsPipeline::GetVertexInputs(
     VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
     VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const {
+    GetVertexInputs(fetch_shader, GetStage(Shader::SwStage::Vertex), attributes, bindings, divisors,
+                    guest_buffers, step_rate_0, step_rate_1);
+}
+
+template <typename Attribute, typename Binding>
+void GraphicsPipeline::GetVertexInputs(
+    const Shader::Gcn::FetchShaderData& fetch_shader, const Shader::Info& vs_info,
+    VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
+    VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
+    VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) {
     using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
     if (fetch_shader.Empty() || fetch_shader.attributes.empty()) {
         return;
     }
-    const auto& vs_info = GetStage(Shader::SwStage::Vertex);
     for (u32 semantic = 0; semantic < fetch_shader.attributes.size(); ++semantic) {
         const auto& attrib = fetch_shader.attributes[semantic];
         const auto step_rate = attrib.GetStepRate();
@@ -518,6 +530,12 @@ template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputBindingDescription>& bindings,
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
     VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
+template void GraphicsPipeline::GetVertexInputs(
+    const Shader::Gcn::FetchShaderData& fetch_shader, const Shader::Info& vs_info,
+    VertexInputs<vk::VertexInputAttributeDescription>& attributes,
+    VertexInputs<vk::VertexInputBindingDescription>& bindings,
+    VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
+    VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1);
 template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputAttributeDescription2EXT>& attributes,
     VertexInputs<vk::VertexInputBindingDescription2EXT>& bindings,

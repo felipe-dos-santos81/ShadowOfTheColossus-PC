@@ -190,8 +190,10 @@ private:
         std::unique_ptr<Translate> translate; ///< a translation job
     };
     bool AsyncPipelineEligible() const;
-    void QueueAsyncPipeline(u64 hash,
-                            const GraphicsPipeline::SerializationSupport* preloaded = nullptr);
+    /// layout: the vertex layout the worker builds from (sotc: computed here when vertex input is
+    /// not dynamic state); preloaded: a pipeline of the boot preload, already in the cache.
+    void QueueAsyncPipeline(u64 hash, const GraphicsPipeline::SerializationSupport* layout = nullptr,
+                            bool preloaded = false);
     bool AsyncPreloadEnabled() const;
     void QueueAsyncTranslate(Shader::HwStage hw_stage, Shader::SwStage sw_stage,
                              const Shader::ShaderParams& params, const Shader::RuntimeInfo& rt,

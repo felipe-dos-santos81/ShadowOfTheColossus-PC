@@ -111,6 +111,15 @@ public:
                          VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
                          VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0,
                          u32 step_rate_1) const;
+    /// sotc: the same from a fetch shader and the vertex stage's info: the command processor
+    /// computes a pipeline worker's layout when vertex input is not dynamic state (KosmicKrisp).
+    template <typename Attribute, typename Binding>
+    static void GetVertexInputs(const Shader::Gcn::FetchShaderData& fetch_shader,
+                                const Shader::Info& vs_info, VertexInputs<Attribute>& attributes,
+                                VertexInputs<Binding>& bindings,
+                                VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
+                                VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0,
+                                u32 step_rate_1);
 
 private:
     void BuildDescSetLayout(bool preloading);

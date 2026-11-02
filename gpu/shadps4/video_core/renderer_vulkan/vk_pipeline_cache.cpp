@@ -602,9 +602,10 @@ static void LogSyncPipeline(const char* kind, const char* reason,
 
 bool PipelineCache::AsyncPipelineEligible() const {
     // Off the command processor the guest registers belong to later draws: only pipelines whose
-    // construction reads nothing from them. Vertex inputs are dynamic state (otherwise they are
-    // read from the vertex buffer sharps), and no image needs its sharp for its binding count.
-    if (!instance.IsVertexInputDynamicState() || EmulatorSettings.IsShaderCollect()) {
+    // construction reads nothing from them. Vertex inputs are dynamic state or, without that
+    // extension (KosmicKrisp), the layout is read from the vertex buffer sharps here and handed
+    // to the worker (QueueAsyncPipeline); no image needs its sharp for its binding count.
+    if (EmulatorSettings.IsShaderCollect()) {
         return false;
     }
     for (const auto* info : infos) {
@@ -634,13 +635,14 @@ bool PipelineCache::AsyncPreloadEnabled() const {
 }
 
 void PipelineCache::QueueAsyncPipeline(u64 hash,
-                                       const GraphicsPipeline::SerializationSupport* preloaded) {
+                                       const GraphicsPipeline::SerializationSupport* layout,
+                                       bool preloaded) {
     auto job = std::make_unique<AsyncPipelineJob>();
     job->key = graphics_key;
     job->hash = hash;
-    if (preloaded) {
-        job->preloaded = true;
-        job->sdata = *preloaded; // the cached vertex layout the pipeline is built from
+    job->preloaded = preloaded;
+    if (layout) {
+        job->sdata = *layout; // the vertex layout the pipeline is built from
     }
     job->infos = infos;
     job->runtime_infos = runtime_infos;
@@ -928,7 +930,19 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         const bool tiny_draw = liverpool->regs.num_indices <= 6;
         const bool eligible = AsyncPipelineEligible();
         if (!async_workers.empty() && !tiny_draw && eligible && !queued) {
-            QueueAsyncPipeline(pipeline_hash);
+            // sotc: without VK_EXT_vertex_input_dynamic_state (KosmicKrisp) the layout comes from
+            // the vertex buffer sharps, valid only here: computed for the worker. Before this every
+            // graphics pipeline on macOS was built on the command processor (0.4-0.5 s each).
+            GraphicsPipeline::SerializationSupport layout{};
+            const auto* vs_info = infos[u32(Shader::SwStage::Vertex)];
+            if (!instance.IsVertexInputDynamicState() && fetch_shader && vs_info) {
+                VertexInputs<AmdGpu::Buffer> guest_buffers;
+                const auto& vs = runtime_infos[u32(Shader::SwStage::Vertex)].sw.vs;
+                GraphicsPipeline::GetVertexInputs(*fetch_shader, *vs_info, layout.vertex_attributes,
+                                                  layout.vertex_bindings, layout.divisors,
+                                                  guest_buffers, vs.step_rate_0, vs.step_rate_1);
+            }
+            QueueAsyncPipeline(pipeline_hash, &layout);
             return nullptr; // the draws that need it are skipped until it is ready
         }
         const SotcStats::ScopedTimer stall_timer{SotcStats::pipeline_ns};

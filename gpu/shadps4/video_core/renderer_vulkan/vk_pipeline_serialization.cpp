@@ -351,7 +351,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     // (SOTC_ASYNC_PRELOAD). Not the ones whose construction reads per-draw state.
     const bool async = AsyncPreloadEnabled() && AsyncPipelineEligible();
     if (async) {
-        QueueAsyncPipeline(std::hash<GraphicsPipelineKey>{}(graphics_key), &sdata);
+        QueueAsyncPipeline(std::hash<GraphicsPipelineKey>{}(graphics_key), &sdata, true);
     } else {
         WarmUpTimer timer{warmup_times.pipelines};
         it.value() = std::make_unique<GraphicsPipeline>(
