@@ -598,6 +598,16 @@ void VideoOutDriver::Flip(const Request& req) {
                              static_cast<unsigned long long>(now_direct),
                              static_cast<unsigned long long>(wait_direct));
             }
+            if (const u64 reads = SotcStats::inplace_read_calls.exchange(0)) {
+                ReportPrintf(report, "SOTC in place: %llu of %llu read-only binds (%.0f of %.0f MB/s bound) could read the game's memory; "
+                                     "uploads %.1f MB/s for them, %.1f MB/s for the others\n",
+                             static_cast<unsigned long long>(SotcStats::inplace_calls.exchange(0)),
+                             static_cast<unsigned long long>(reads),
+                             SotcStats::inplace_bytes.exchange(0) / 1e6 / seconds,
+                             SotcStats::inplace_read_bytes.exchange(0) / 1e6 / seconds,
+                             SotcStats::inplace_upload_bytes.exchange(0) / 1e6 / seconds,
+                             SotcStats::other_upload_bytes.exchange(0) / 1e6 / seconds);
+            }
             if (const u64 streamed = SotcStats::rb_stream_windows.exchange(0)) {
                 ReportPrintf(report, "SOTC readback stream windows: %llu\n",
                              static_cast<unsigned long long>(streamed));

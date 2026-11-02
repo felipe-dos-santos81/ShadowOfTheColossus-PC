@@ -94,7 +94,8 @@ escrever, o port lê direto, sem esperar uma cópia da GPU (30 FPS travados no S
 comparar.
 
 No macOS o driver Vulkan (KosmicKrisp, Vulkan sobre Metal) é compilado por `tools/macos_deps.sh`
-com o LLVM do Homebrew (`brew install llvm`), não com o clang da Apple: este transforma cópias de
+com o LLVM do Homebrew (`make install` instala as ferramentas do Homebrew, o LLVM entre elas), não
+com o clang da Apple: este transforma cópias de
 tamanho fixo em `rep movsb`, que o Rosetta executa 16 vezes mais devagar que um `memcpy`, e o
 driver faz duas dessas cópias por desenho (~30% da thread que grava os comandos). Com o driver
 refeito, o modo 60 FPS no Santuário passou de ~32 para ~35 FPS; o modo normal segue travado em 30.

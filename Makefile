@@ -8,7 +8,7 @@ EXE = $(if $(filter Windows_NT,$(OS)),.exe)
 # GAME_DIR=... overrides the game dump only when given (else sotc.py: env, sotc.ini, defaults)
 RUN = $(if $(GAME_DIR),SOTC_GAME_DIR="$(abspath $(GAME_DIR))" )$(PYTHON) sotc.py
 
-.PHONY: help deps build rebuild run test clean clean-all
+.PHONY: help install deps build rebuild run test clean clean-all
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
@@ -19,7 +19,16 @@ help: ## Print this help message
 		awk 'BEGIN {FS = ":.*?## "}; \
 		{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-deps: ## [macOS] Build x86_64 deps + KosmicKrisp Vulkan driver into out/deps-x86_64 (skips what is built)
+install: ## [macOS] Install the Homebrew tools deps needs (Homebrew LLVM builds the Vulkan driver) + Python modules for Mesa
+ifeq ($(shell uname -s),Darwin)
+	brew install llvm cmake ninja meson nasm pkgconf boost spirv-llvm-translator spirv-tools glslang
+	$(PYTHON) -m pip install --quiet mako pyyaml packaging
+	@[ -d "$$HOME/VulkanSDK" ] || echo "Vulkan SDK (headers, loader) not found in ~/VulkanSDK: install it from https://vulkan.lunarg.com/sdk/home"
+else
+	@echo "make install is for macOS; on Windows follow packaging/windows/README.md (MSYS2 CLANG64)"
+endif
+
+deps: ## [macOS] Build x86_64 deps + KosmicKrisp Vulkan driver into out/deps-x86_64 (skips what is built; make install first)
 	bash tools/macos_deps.sh
 
 build: ## Build bb-probe (CMake + Ninja; macOS: x86_64 for Rosetta 2, runs deps first)

@@ -29,6 +29,7 @@ extern "C" uintptr_t runtime_sotc_heap_table(void);
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/sotc_guest_memory.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 #include <vk_mem_alloc.h>
@@ -1244,6 +1245,22 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         // (+7% on the heavy benchmark, attract demo min 20 -> 24 FPS).
         return v ? std::strtoull(v, nullptr, 0) : u64{0};
     }();
+    if (Vulkan::SotcGuestMemory::Enabled()) {
+        SotcStats::t_inplace_bind = false;
+    }
+    if (!is_written && Vulkan::SotcGuestMemory::Enabled()) {
+        // macos: step 1 of PLANO-MEMORIA-UNIFICADA-MAC: how much could the GPU read in place?
+        SotcStats::inplace_read_calls.fetch_add(1, std::memory_order_relaxed);
+        SotcStats::inplace_read_bytes.fetch_add(size, std::memory_order_relaxed);
+        if (!IsRegionGpuModified(device_addr, size)) {
+            if (const u8* host = memory->GetBackingPointer(device_addr);
+                host && Vulkan::SotcGuestMemory::Get(host, size).buffer) {
+                SotcStats::inplace_calls.fetch_add(1, std::memory_order_relaxed);
+                SotcStats::inplace_bytes.fetch_add(size, std::memory_order_relaxed);
+                SotcStats::t_inplace_bind = true;
+            }
+        }
+    }
     if (!is_written && size <= stream_threshold && !IsRegionGpuModified(device_addr, size)) {
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
@@ -1868,6 +1885,8 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         SotcStats::uploads.fetch_add(1, std::memory_order_relaxed);
         if (SotcStats::kCmdStats) { // sotc: read only by the SOTC_CMD_STATS printer
             SotcStats::upload_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
+            (SotcStats::t_inplace_bind ? SotcStats::inplace_upload_bytes : SotcStats::other_upload_bytes)
+                .fetch_add(total_size_bytes, std::memory_order_relaxed);
         }
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         // sotc: a large upload made of several ranges (a streaming burst: 200+ MB in one frame)

@@ -35,6 +35,13 @@ inline const bool kPushDescriptors = [] {
     const char* v = std::getenv("SOTC_PUSH_DESC");
     return !v || v[0] != '0';
 }();
+/// macos: PLANO-MEMORIA-UNIFICADA-MAC step 1: ObtainBuffer calls (and bytes) the GPU only reads,
+/// not GPU-modified, whose range lies in one imported chunk of the game's memory (could be read in
+/// place), against every read-only ObtainBuffer call. Counted while SOTC_PC_MEMORY=1.
+inline std::atomic<uint64_t> inplace_calls{0}, inplace_bytes{0}, inplace_read_calls{0}, inplace_read_bytes{0};
+/// macos: bytes SynchronizeMemory uploaded for binds that could read in place / for the others.
+inline std::atomic<uint64_t> inplace_upload_bytes{0}, other_upload_bytes{0};
+inline thread_local bool t_inplace_bind = false; ///< set by ObtainBuffer around SynchronizeMemory
 inline std::atomic<uint64_t> fast_bind_eligible{0};
 inline std::atomic<uint64_t> fast_bind_hits{0};
 /// sotc: bumped whenever guest memory changes outside the GPU's own draws: a write by the command
