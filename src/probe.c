@@ -977,37 +977,55 @@ static void *mac_profiler(void *unused) {
         user0[i]=info.user_time.seconds+info.user_time.microseconds*1e-6;
         system0[i]=info.system_time.seconds+info.system_time.microseconds*1e-6;
     }
+    /* SOTC_PROFILE_TIMELINE=<file> (diagnostic): the game's job workers, update thread and the GPU
+     * threads are sampled every round, running or not, one line per sample: "t <round> <us>
+     * <thread> <running> <rip> <return addresses...>" (tools/profile_timeline.py). */
+    FILE *timeline=getenv("SOTC_PROFILE_TIMELINE") ? fopen(getenv("SOTC_PROFILE_TIMELINE"),"w") : NULL;
+    unsigned char *pick=calloc(count,1);
+    for (uint32_t i=0;timeline && i<count;++i) {
+        char name[64]="";
+        pthread_t p=pthread_from_mach_thread_np(threads[i]);
+        if (p) pthread_getname_np(p,name,sizeof(name));
+        pick[i]=strstr(name,"BPE")||strstr(name,"Shadow Game")||strstr(name,"shadPS4:Gpu")||strstr(name,"RenderFlip");
+        if (pick[i]) fprintf(timeline,"name %u %s\n",i,name);
+    }
     struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
-    const double end=now.tv_sec+now.tv_nsec*1e-9+(seconds ? atoi(seconds) : 10);
+    const double start=now.tv_sec+now.tv_nsec*1e-9, end=start+(seconds ? atoi(seconds) : 10);
     unsigned rounds=0;
     for (;;) {
         clock_gettime(CLOCK_MONOTONIC,&now);
         if (now.tv_sec+now.tv_nsec*1e-9>=end) break;
         ++rounds;
+        const unsigned long us=(unsigned long)((now.tv_sec+now.tv_nsec*1e-9-start)*1e6);
         for (uint32_t i=0;i<count;++i) {
             thread_basic_info_data_t info; mach_msg_type_number_t n=THREAD_BASIC_INFO_COUNT;
             if (threads[i]==self || thread_info(threads[i],THREAD_BASIC_INFO,(thread_info_t)&info,&n)) continue;
             /* Waiting threads every tenth round, counted apart (thread index + MAC_PROFILE_WAIT):
              * where they wait. */
             const int running=info.run_state==TH_STATE_RUNNING;
-            if ((!running && rounds%10) || thread_suspend(threads[i])) continue;
+            const int counted=running || rounds%10==0;
+            if ((!counted && !pick[i]) || thread_suspend(threads[i])) continue;
             const uint32_t slot=running ? i : i+MAC_PROFILE_WAIT;
             x86_thread_state64_t s; mach_msg_type_number_t sn=x86_THREAD_STATE64_COUNT;
             if (!thread_get_state(threads[i],x86_THREAD_STATE64,(thread_state_t)&s,&sn)) {
-                if (running) ++busy[i]; else ++waits[i];
-                mac_profile_add(slot,(uintptr_t)s.__rip,1);
+                if (counted) { if (running) ++busy[i]; else ++waits[i]; }
+                if (counted) mac_profile_add(slot,(uintptr_t)s.__rip,1);
+                if (pick[i]) fprintf(timeline,"t %u %lu %u %d 0x%llx",rounds,us,i,running,(unsigned long long)s.__rip);
                 uintptr_t frame=(uintptr_t)s.__rbp, ret;
                 for (int depth=0; depth<32 && frame && mac_read_word(frame+8,&ret) && ret; ++depth) {
-                    mac_profile_add(slot,ret,0);
+                    if (counted) mac_profile_add(slot,ret,0);
+                    if (pick[i] && depth<16) fprintf(timeline," 0x%lx",(unsigned long)ret);
                     uintptr_t next;
                     if (!mac_read_word(frame,&next) || next<=frame) break;
                     frame=next;
                 }
+                if (pick[i]) fputc('\n',timeline);
             }
             thread_resume(threads[i]);
         }
         usleep(2000);
     }
+    if (timeline) fclose(timeline);
     fprintf(stderr,"SOTC profile of all %u threads: %u rounds\n",count,rounds);
     FILE *out=getenv("SOTC_PROFILE_OUT") ? fopen(getenv("SOTC_PROFILE_OUT"),"w") : NULL;
     for (uint32_t i=0;i<count;++i) {
@@ -1028,7 +1046,9 @@ static void *mac_profiler(void *unused) {
     for (size_t s=0;out && s<MAC_PROFILE_SLOTS;++s) {
         const uintptr_t address=mac_profile_slots[s].address;
         Dl_info where;
-        if (address>=UINT64_C(0x710000000000) && dladdr((void *)address,&where) && where.dli_fname) {
+        /* Any host address outside bb-probe: the dylibs (Vulkan loader, KosmicKrisp) load low under Rosetta. */
+        if (address>=UINT64_C(0x80000000) && !(address>=UINT64_C(0x700000000000) && address<UINT64_C(0x710000000000)) &&
+            dladdr((void *)address,&where) && where.dli_fname) {
             const char *library=strrchr(where.dli_fname,'/');
             fprintf(out,"lib 0x%lx %s!%s\n",(unsigned long)address,library ? library+1 : where.dli_fname,
                     where.dli_sname ? where.dli_sname : "?");

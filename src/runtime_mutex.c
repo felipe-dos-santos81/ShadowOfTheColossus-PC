@@ -9,7 +9,7 @@
 #include <time.h>
 typedef struct { int type; } GuestAttr;
 /* sotc: owner and lock site are kept for hang reports (long waits are reported). */
-typedef struct { pthread_mutex_t native; unsigned long owner; void *site; unsigned depth; } GuestMutex;
+typedef struct { pthread_mutex_t native; unsigned long owner; void *site; unsigned depth; uint64_t acquired; } GuestMutex;
 #ifdef _WIN32
 #include <windows.h>
 static unsigned long current_tid(void) { return GetCurrentThreadId(); }
@@ -114,6 +114,58 @@ static int spin_lock(GuestMutex *m) {
         if ((i & 15) == 0 && mach_absolute_time() >= end) return EBUSY;
     }
 }
+/* macos: SOTC_MUTEX_STATS=1 (diagnostic): per guest lock site, how many locks found the mutex
+ * taken, how many slept in the kernel, the wait and hold times; printed every 5 s. */
+typedef struct {
+    void *site;
+    uint64_t locks, contended, kernel, wait_ns, hold_ns, hold_100us, hold_1ms, hold_max;
+} MutexSite;
+#define SITE_ADD(x, v) __atomic_fetch_add(&(x), (v), __ATOMIC_RELAXED)
+static MutexSite sites[8];
+static int stats_on = -1;
+static uint64_t stats_num = 1, stats_den = 1;
+static uint64_t now_ns(void) { return mach_absolute_time() * stats_num / stats_den; }
+static MutexSite *site_of(void *site) {
+    for (int i = 0; i < 8; ++i) {
+        void *s = __atomic_load_n(&sites[i].site, __ATOMIC_ACQUIRE);
+        if (s == site) return &sites[i];
+        if (!s) {
+            void *none = NULL;
+            if (__atomic_compare_exchange_n(&sites[i].site, &none, site, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || none == site)
+                return &sites[i];
+        }
+    }
+    return NULL;
+}
+static void stats_hold(GuestMutex *m) {
+    MutexSite *st = site_of(m->site);
+    if (!st) return;
+    const uint64_t hold = now_ns() - m->acquired;
+    m->acquired = 0; /* a later trylock acquisition has no timestamp */
+    SITE_ADD(st->hold_ns, hold);
+    if (hold > 100000) SITE_ADD(st->hold_100us, 1);
+    if (hold > 1000000) SITE_ADD(st->hold_1ms, 1);
+    uint64_t max = st->hold_max;
+    while (hold > max && !__atomic_compare_exchange_n(&st->hold_max, &max, hold, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    static uint64_t next_print;
+    const uint64_t now = now_ns();
+    uint64_t due = next_print;
+    if (now < due || !__atomic_compare_exchange_n(&next_print, &due, now + 5000000000ull, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
+    if (!due) return;
+    for (int i = 0; i < 8 && sites[i].site; ++i) {
+        MutexSite *x = &sites[i];
+        const uint64_t n = __atomic_exchange_n(&x->locks, 0, __ATOMIC_RELAXED);
+        if (!n) continue;
+        const uint64_t c = __atomic_exchange_n(&x->contended, 0, __ATOMIC_RELAXED), k = __atomic_exchange_n(&x->kernel, 0, __ATOMIC_RELAXED);
+        const uint64_t w = __atomic_exchange_n(&x->wait_ns, 0, __ATOMIC_RELAXED), h = __atomic_exchange_n(&x->hold_ns, 0, __ATOMIC_RELAXED);
+        fprintf(stderr, "Runtime: mutex site %p: %llu locks/s, %llu contended, %llu slept; wait avg %.2f us (%.0f ms/s), hold avg %.2f us, >100us %llu, >1ms %llu, max %.0f us\n",
+                x->site, (unsigned long long)(n / 5), (unsigned long long)(c / 5), (unsigned long long)(k / 5),
+                c ? w / 1000.0 / c : 0.0, w / 5e6, h / 1000.0 / n,
+                (unsigned long long)__atomic_exchange_n(&x->hold_100us, 0, __ATOMIC_RELAXED),
+                (unsigned long long)__atomic_exchange_n(&x->hold_1ms, 0, __ATOMIC_RELAXED),
+                __atomic_exchange_n(&x->hold_max, 0, __ATOMIC_RELAXED) / 1000.0);
+    }
+}
 #endif
 static ABI int32_t mutex_lock(GuestMutex **mutex) {
     int32_t e = ensure_mutex(mutex);
@@ -121,7 +173,14 @@ static ABI int32_t mutex_lock(GuestMutex **mutex) {
     GuestMutex *m = *mutex;
     int native = pthread_mutex_trylock(&m->native);
 #ifdef __APPLE__
-    if (native == EBUSY) native = spin_lock(m);
+    if (stats_on < 0) {
+        mach_timebase_info_data_t base;
+        mach_timebase_info(&base);
+        stats_num = base.numer; stats_den = base.denom;
+        stats_on = getenv("SOTC_MUTEX_STATS") != NULL;
+    }
+    const uint64_t t0 = stats_on ? now_ns() : 0;
+    const int contended = native == EBUSY, slept = contended && (native = spin_lock(m)) == EBUSY;
 #endif
     for (int waited = 0; native == EBUSY;) {
         struct timespec slice;
@@ -144,6 +203,13 @@ static ABI int32_t mutex_lock(GuestMutex **mutex) {
     }
     e = orbis_error(native);
     if (!e) { ++locks; m->owner = current_tid(); m->site = __builtin_return_address(0); ++m->depth; }
+#ifdef __APPLE__
+    if (!e && stats_on && m->depth == 1) {
+        m->acquired = now_ns();
+        MutexSite *st = site_of(m->site);
+        if (st) { SITE_ADD(st->locks, 1); SITE_ADD(st->contended, contended); SITE_ADD(st->kernel, slept); SITE_ADD(st->wait_ns, m->acquired - t0); }
+    }
+#endif
     return e;
 }
 static ABI int32_t mutex_trylock(GuestMutex **mutex) {
@@ -160,6 +226,9 @@ static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     unsigned depth = m->depth;
     if (depth) --m->depth;
     if (!m->depth) m->owner = 0;
+#ifdef __APPLE__
+    if (stats_on > 0 && !m->depth && m->acquired) stats_hold(m);
+#endif
     int32_t e = orbis_error(pthread_mutex_unlock(&m->native));
     if (e) m->depth = depth;
     if (!e) ++unlocks;

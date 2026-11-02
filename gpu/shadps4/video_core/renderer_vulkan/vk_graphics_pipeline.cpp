@@ -11,6 +11,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/sotc_stats.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -563,7 +564,7 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
             });
         }
     }
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    uses_push_descriptors = SotcStats::kPushDescriptors && binding < instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};

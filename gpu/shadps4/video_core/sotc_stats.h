@@ -28,6 +28,13 @@ inline const bool kFastBind = [] {
     const char* v = std::getenv("SOTC_FAST_BIND");
     return !v || v[0] != '0';
 }();
+/// sotc: SOTC_PUSH_DESC=0 binds descriptor sets from the heap instead of pushing them. On
+/// KosmicKrisp a pushed set costs the recorder a 2 KiB upload per draw (kk_cmd_buffer_flush_push_
+/// descriptors); a bound set is written by the draw thread (vkUpdateDescriptorSets).
+inline const bool kPushDescriptors = [] {
+    const char* v = std::getenv("SOTC_PUSH_DESC");
+    return !v || v[0] != '0';
+}();
 inline std::atomic<uint64_t> fast_bind_eligible{0};
 inline std::atomic<uint64_t> fast_bind_hits{0};
 /// sotc: bumped whenever guest memory changes outside the GPU's own draws: a write by the command
